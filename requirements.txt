@@ -1,8 +1,8 @@
 aiogram==3.13.1
 Pillow==10.4.0
-rembg==2.0.59
-onnxruntime==1.19.2
-numpy==1.26.4
+rembg>=2.0.62
+onnxruntime>=1.19.2
+numpy>=1.26.4
 python-dotenv==1.0.1
 arabic-reshaper==3.0.0
 python-bidi==0.6.3
