@@ -1,34 +1,28 @@
 """
-هذا الملف هو "منطق البوت" - يدير الأسئلة بالترتيب:
-صورة -> اسم -> سعر -> مواصفات -> توافق -> عرض ترويجي -> اختيار قالب -> اختيار مقاس -> توليد البوستر
+تدفق العمل الذكي باستخدام Gemini API لتصحيح النصوص وصياغتها دفعة واحدة.
 """
 import os
 import uuid
-
+import json
+import gc
+import google.generativeai as genai
 from aiogram import Router, F
-from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 
-from config import TEMPLATES, OUTPUT_SIZES, GENERATED_DIR
+from config import TEMPLATES, OUTPUT_SIZES, GENERATED_DIR, GEMINI_API_KEY
 from database import get_company_settings
 from background_removal import remove_background
 from poster_generator import generate_poster
 
 router = Router()
 
-
 class PosterFlow(StatesGroup):
     waiting_photo = State()
-    waiting_name = State()
-    waiting_price = State()
-    waiting_features = State()
-    waiting_socket = State()
-    waiting_promo = State()
+    waiting_details = State()
     waiting_template = State()
     waiting_size = State()
-
 
 def _template_keyboard():
     buttons = [
@@ -37,131 +31,131 @@ def _template_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
 def _size_keyboard():
     labels = {
-        "instagram_post": "Instagram Post (مربع)",
-        "instagram_portrait": "Instagram Portrait",
-        "story": "Story / ستوري",
-        "facebook_post": "Facebook Post",
+        "instagram_post": "مربع (Instagram Post)",
+        "instagram_portrait": "طولي (Portrait)",
+        "story": "ستوري / حالة (Story)",
+        "facebook_post": "منشور فيسبوك (Facebook)",
     }
     buttons = [
-        [InlineKeyboardButton(text=labels[key], callback_data=f"size:{key}")]
-        for key in OUTPUT_SIZES
+        [InlineKeyboardButton(text=label, callback_data=f"size:{key}")]
+        for key, label in labels.items()
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
-@router.message(Command("start"))
+@router.message(F.text == "/start")
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        "أهلاً بك في بوت تصميم البوسترات الإعلانية 🚗🔴\n\n"
-        "أرسل الآن *صورة المنتج* (بدون خلفية، الصورة بس، وبإضاءة واضحة) لأبدأ التصميم.",
-        parse_mode="Markdown",
-    )
+    await message.answer("👋 أهلاً بك في بوت التصميم الذكي المطور.\n📸 من فضلك أرسل لي **صورة المنتج** أولاً لبدء العمل:")
     await state.set_state(PosterFlow.waiting_photo)
-
 
 @router.message(PosterFlow.waiting_photo, F.photo)
 async def got_photo(message: Message, state: FSMContext):
-    processing = await message.answer("⏳ جاري إزالة الخلفية وتحسين الصورة، لحظات...")
-
     photo = message.photo[-1]
-    file = await message.bot.get_file(photo.file_id)
-    raw_path = os.path.join(GENERATED_DIR, f"raw_{uuid.uuid4().hex}.jpg")
-    clean_path = os.path.join(GENERATED_DIR, f"clean_{uuid.uuid4().hex}.png")
-    await message.bot.download_file(file.file_path, destination=raw_path)
+    msg = await message.answer("⏳ جاري سحب الصورة وإزالة الخلفية وتحسين جودة المنتج برمجياً...")
+    
+    raw_path = f"raw_{uuid.uuid4()}.png"
+    clean_path = f"clean_{uuid.uuid4()}.png"
+    
+    try:
+        await message.bot.download(photo, destination=raw_path)
+        remove_background(raw_path, clean_path)
+        
+        await state.update_data(product_image=clean_path, raw_image=raw_path)
+        await msg.edit_text("✅ تم تجهيز المنتج بنجاح!\n✍️ الآن أرسل لي **بيانات المنتج** في رسالة واحدة (مثال: اسم المنتج، السعر، المميزات مثل ضمان أو سطوع عالي، إلخ). سيتولى الذكاء الاصطناعي تنظيمها بدون أخطاء إملائية:")
+        await state.set_state(PosterFlow.waiting_details)
+    except Exception as e:
+        await msg.edit_text(f"❌ حدث خطأ أثناء معالجة الصورة. يرجى المحاولة مرة أخرى.")
+        if os.path.exists(raw_path): os.remove(raw_path)
+        if os.path.exists(clean_path): os.remove(clean_path)
 
-    remove_background(raw_path, clean_path)
-
-    await state.update_data(product_image=clean_path)
-    await processing.edit_text("✅ تم! الآن أرسل *اسم المنتج*", parse_mode="Markdown")
-    await state.set_state(PosterFlow.waiting_name)
-
-
-@router.message(PosterFlow.waiting_photo)
-async def wrong_photo(message: Message):
-    await message.answer("الرجاء إرسال صورة للمنتج (كصورة وليس كملف).")
-
-
-@router.message(PosterFlow.waiting_name, F.text)
-async def got_name(message: Message, state: FSMContext):
-    await state.update_data(product_name=message.text.strip())
-    await message.answer("💰 الآن أرسل *السعر* (أو اكتب `تخطي` إذا ما تريد إظهار السعر)", parse_mode="Markdown")
-    await state.set_state(PosterFlow.waiting_price)
-
-
-@router.message(PosterFlow.waiting_price, F.text)
-async def got_price(message: Message, state: FSMContext):
-    price = "" if message.text.strip() in ("تخطي", "skip") else message.text.strip()
-    await state.update_data(price=price)
-    await message.answer(
-        "🔧 أرسل *المواصفات* الآن - كل ميزة بسطر منفصل، مثال:\n\n"
-        "12000LM\n2 Years Warranty\nWhite LED\nCopper Cooling",
-        parse_mode="Markdown",
-    )
-    await state.set_state(PosterFlow.waiting_features)
-
-
-@router.message(PosterFlow.waiting_features, F.text)
-async def got_features(message: Message, state: FSMContext):
-    features = [line.strip() for line in message.text.split("\n") if line.strip()]
-    await state.update_data(features=features)
-    await message.answer("🔌 أرسل *التوافق* (مثال: H4, H7, 9005) أو اكتب `تخطي`", parse_mode="Markdown")
-    await state.set_state(PosterFlow.waiting_socket)
-
-
-@router.message(PosterFlow.waiting_socket, F.text)
-async def got_socket(message: Message, state: FSMContext):
-    socket = "" if message.text.strip() in ("تخطي", "skip") else message.text.strip()
-    await state.update_data(socket=socket)
-    await message.answer("📣 أرسل *نص العرض الترويجي* (مثال: Limited Time Offer) أو اكتب `تخطي`", parse_mode="Markdown")
-    await state.set_state(PosterFlow.waiting_promo)
-
-
-@router.message(PosterFlow.waiting_promo, F.text)
-async def got_promo(message: Message, state: FSMContext):
-    promo = "" if message.text.strip() in ("تخطي", "skip") else message.text.strip()
-    await state.update_data(promo_text=promo)
-    await message.answer("🎨 اختر القالب (Template):", reply_markup=_template_keyboard())
-    await state.set_state(PosterFlow.waiting_template)
-
+@router.message(PosterFlow.waiting_details, F.text)
+async def got_details(message: Message, state: FSMContext):
+    if not GEMINI_API_KEY:
+        await message.answer("❌ خطأ: مفتاح Gemini API غير معرف في إعدادات السيرفر.")
+        return
+        
+    msg = await message.answer("🧠 يقوم Gemini الآن بتحليل النص، صياغته إعلانياً وتصحيحه إملائياً...")
+    
+    # تشغيل العقل المفكر Gemini
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    prompt = f"""
+    أنت مصحح لغوي ومسوق محترف ل كماليات السيارات. خذ النص التالي واستخرج منه بيانات المنتج بدقة تامة وباللغة العربية الفصحى بدون أخطاء إملائية.
+    يجب أن تعيد النتيجة كـ JSON صلب فقط بدون أي علامات ماركداون أو نصوص إضافية خارج أقواس الـ JSON.
+    النص: "{message.text}"
+    
+    عليك صياغة الحقول التالية في الـ JSON:
+    1. "product_name": اسم المنتج بشكل فخم وجذاب وقصير.
+    2. "price": السعر متبوعاً بكلمة د.ل (إذا لم يذكر السعر اترك الحقل فارغاً "").
+    3. "features": مصفوفة تحتوي على 3 إلى 4 مميزات باختصار شديد جداً (من 2 إلى 4 كلمات للميزة الواحدة) لتناسب التصميم مثل ("سطوع فائق", "تركيب سهل وسريع", "ضمان لمدة سنة", "مقاوم للحرارة").
+    4. "promo_text": جملة ترويجية للمنتج أسفل الاسم (مثل: "الجيل الجديد من الإضاءة الذكية").
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        clean_text = response.text.strip().replace("```json", "").replace("```", "")
+        parsed_data = json.loads(clean_text)
+        
+        await state.update_data(
+            product_name=parsed_data.get("product_name", "منتج متمير"),
+            price=parsed_data.get("price", ""),
+            features=parsed_data.get("features", []),
+            promo_text=parsed_data.get("promo_text", "")
+        )
+        
+        await msg.edit_text("🎨 اختر مظهر البوستر الإعلاني:", reply_markup=_template_keyboard())
+        await state.set_state(PosterFlow.waiting_template)
+    except Exception as e:
+        await msg.edit_text("⚠️ لم يتمكن الذكاء الاصطناعي من هيكلة النص تلقائياً، سيتم استخدام النص الافتراضي لتجنب التوقف.")
+        await state.update_data(product_name="منتج ممتاز", price="", features=["جودة عالية", "أداء مثالي"], promo_text="")
+        await message.answer("🎨 اختر مظهر البوستر الإعلاني:", reply_markup=_template_keyboard())
+        await state.set_state(PosterFlow.waiting_template)
 
 @router.callback_query(PosterFlow.waiting_template, F.data.startswith("tpl:"))
 async def got_template(callback: CallbackQuery, state: FSMContext):
     template_key = callback.data.split(":", 1)[1]
     await state.update_data(template_key=template_key)
-    await callback.message.edit_text("📐 اختر مقاس الإخراج:")
-    await callback.message.answer("اختر المقاس:", reply_markup=_size_keyboard())
+    await callback.message.edit_text("📐 اختر مقاس النشر المطلوب للتصميم المرجعي:")
+    await callback.message.answer("المقاسات المتوفرة:", reply_markup=_size_keyboard())
     await state.set_state(PosterFlow.waiting_size)
     await callback.answer()
-
 
 @router.callback_query(PosterFlow.waiting_size, F.data.startswith("size:"))
 async def got_size(callback: CallbackQuery, state: FSMContext):
     size_key = callback.data.split(":", 1)[1]
     data = await state.get_data()
-
-    await callback.message.edit_text("🖌️ جاري تصميم البوستر النهائي، ثوانٍ...")
-
+    
+    await callback.message.edit_text("🖌️ جاري رسم البوستر بهندسة التصميم المرجعي الفاخر، ثوانٍ...")
+    
     company = get_company_settings()
     output_path = generate_poster(
         product_image_path=data["product_image"],
         product_name=data.get("product_name", ""),
         price=data.get("price", ""),
         features=data.get("features", []),
-        socket=data.get("socket", ""),
+        socket="",
         promo_text=data.get("promo_text", ""),
         company=company,
-        template_key=data.get("template_key", "luxury_black"),
-        size_key=size_key,
+        template_key=data.get("template_key", "luxury_dark"),
+        size_key=size_key
     )
-
-    photo = FSInputFile(output_path)
-    await callback.message.answer_photo(
-        photo,
-        caption="✅ البوستر جاهز! أرسل /start لتصميم منتج جديد.",
-    )
+    
+    if output_path and os.path.exists(output_path):
+        await callback.message.answer_photo(
+            photo=FSInputFile(output_path),
+            caption="✨ ها هي النتيجة النهائية الفاخرة المرجعية بدون أي خطأ إملائي وبثبات تام!"
+        )
+        os.remove(output_path)
+    else:
+        await callback.message.answer("❌ حدث خطأ غير متوقع أثناء رسم الصورة النهائية.")
+        
+    # تنظيف فوري وشامل لملفات النظام المؤقتة وتحرير الذاكرة
+    if os.path.exists(data["product_image"]): os.remove(data["product_image"])
+    if os.path.exists(data["raw_image"]): os.remove(data["raw_image"])
+    
+    gc.collect() # تحرير الرام فوراً منعاً لأخطاء Railway
     await state.clear()
     await callback.answer()
