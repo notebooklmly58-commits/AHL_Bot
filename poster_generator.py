@@ -34,10 +34,21 @@ logger = logging.getLogger(__name__)
 RAQM_AVAILABLE = features.check("raqm")
 if not RAQM_AVAILABLE:
     logger.error(
-        "مكتبة Pillow المثبتة لا تدعم RAQM (تنضيد النص العربي الصحيح). "
-        "سيتم استخدام حل بديل أقل دقة. للحل النهائي: نفّذ الأمر "
-        "'pip install --upgrade --force-reinstall pillow' على السيرفر."
+        "مكتبة Pillow المثبتة لا تدعم RAQM. سيتم استخدام المسار البديل "
+        "المُصحح (إعداد use_unshaped_instead_of_isolated) الذي يعمل بشكل "
+        "سليم مع خط Tajawal دون الحاجة لـ RAQM إطلاقاً."
     )
+
+# إعداد موثّق رسمياً من مكتبة arabic_reshaper نفسها لحل مشكلة الحروف
+# الناقصة تحديداً: بعض الخطوط (ومنها Tajawal) لا تحتوي على "الشكل المعزول"
+# (Isolated Form) لبعض الحروف الذي يستخدمه الإعداد الافتراضي للمكتبة،
+# فتظهر مربعات فارغة مكان تلك الحروف تحديداً (كما في الصور التي أرسلتها).
+# تفعيل use_unshaped_instead_of_isolated يجعل المكتبة تستخدم الشكل الأساسي
+# للحرف بدل الشكل المعزول المفقود، وهذا يحل المشكلة نهائياً بغض النظر عن
+# توفر RAQM من عدمه.
+_reshaper = arabic_reshaper.ArabicReshaper(
+    configuration={"use_unshaped_instead_of_isolated": True, "delete_harakat": True}
+)
 
 # ------------------------------------------------------------------
 # إدارة الخطوط
@@ -154,16 +165,15 @@ def fonts_are_ready() -> bool:
 
 def fix_arabic_text(text: str) -> str:
     """تجهيز النص العربي للرسم.
-    - إذا كان RAQM متوفراً (الوضع الطبيعي): لا حاجة لأي معالجة يدوية إطلاقاً،
-      لأن draw_rtl_text أدناه يمرر النص الخام ويترك محرك RAQM يتولى التشكيل
-      والترتيب الصحيحين اعتماداً على جداول OpenType الحقيقية في ملف الخط.
-    - إذا لم يتوفر RAQM (حالة استثنائية): نستخدم كحل احتياطي فقط إعادة
-      التشكيل اليدوي مع ترتيب bidi الرسمي (أدق من العكس اليدوي القديم)."""
+    - إذا كان RAQM متوفراً: لا حاجة لأي معالجة يدوية، RAQM يتولى كل شيء.
+    - إذا لم يتوفر RAQM (حالة سيرفرك حالياً): نستخدم إعادة التشكيل مع
+      إعداد use_unshaped_instead_of_isolated المُصحح خصيصاً ليعمل بشكل
+      سليم مع خطوط مثل Tajawal، مع ترتيب bidi الرسمي للنص المختلط."""
     if not text:
         return ""
     if RAQM_AVAILABLE:
         return text
-    reshaped = arabic_reshaper.reshape(text)
+    reshaped = _reshaper.reshape(text)
     return get_display(reshaped)
 
 
