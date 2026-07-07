@@ -8,12 +8,36 @@ import os
 import uuid
 import logging
 import requests
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, features
 from config import OUTPUT_SIZES, FONTS_DIR, LOGO_DIR, GENERATED_DIR
 import arabic_reshaper
 from bidi.algorithm import get_display
 
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------
+# محرك تنسيق النص العربي (الحل الجذري)
+# ------------------------------------------------------------------
+# المشكلة الحقيقية: مكتبة arabic_reshaper تحوّل كل حرف إلى رمز يونيكود
+# من نطاق "Presentation Forms" الخاص بالشكل المتصل للحرف. لكن ليست كل
+# الخطوط (ومنها Tajawal) تحتوي فعلياً على رسمة (Glyph) لكل رمز من هذه
+# الرموز داخل ملف الخط - فتظهر مربعات فارغة لبعض الحروف تحديداً (خصوصاً
+# حروف الربط مثل "لا") بينما تظهر حروف أخرى بشكل سليم. هذا يفسّر ظهور
+# مربعات متفرقة وسط كلام يبدو صحيحاً جزئياً.
+#
+# الحل الصحيح والمعتمد عالمياً: استخدام محرك التنضيد RAQM المدمج داخل
+# مكتبة Pillow نفسها، والذي يقوم بعملية "التشكيل" (Shaping) الحقيقية
+# عبر جداول OpenType الموجودة داخل ملف الخط مباشرة (تماماً كما تعرض
+# المتصفحات وبرامج التصميم النص العربي)، بدل تخمين الشكل يدوياً. هذا
+# يلغي الحاجة لأي "حيلة" برمجية، ويعمل بشكل صحيح 100% مع أي خط عربي
+# سليم مثل Tajawal.
+RAQM_AVAILABLE = features.check("raqm")
+if not RAQM_AVAILABLE:
+    logger.error(
+        "مكتبة Pillow المثبتة لا تدعم RAQM (تنضيد النص العربي الصحيح). "
+        "سيتم استخدام حل بديل أقل دقة. للحل النهائي: نفّذ الأمر "
+        "'pip install --upgrade --force-reinstall pillow' على السيرفر."
+    )
 
 # ------------------------------------------------------------------
 # إدارة الخطوط
@@ -63,11 +87,12 @@ def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
 
     font_name = "Tajawal-Bold.ttf" if bold else "Tajawal-Regular.ttf"
     font_path = os.path.join(FONTS_DIR, font_name)
+    layout_engine = ImageFont.Layout.RAQM if RAQM_AVAILABLE else ImageFont.Layout.BASIC
 
     # 1) الخط المرفوع يدوياً داخل المشروع (الأكثر ثباتاً وموصى به)
     if os.path.exists(font_path) and os.path.getsize(font_path) > _MIN_VALID_FONT_BYTES:
         try:
-            font = ImageFont.truetype(font_path, size)
+            font = ImageFont.truetype(font_path, size, layout_engine=layout_engine)
             _font_cache[cache_key] = font
             return font
         except Exception as e:
@@ -77,7 +102,7 @@ def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     _download_font_if_missing()
     if os.path.exists(font_path) and os.path.getsize(font_path) > _MIN_VALID_FONT_BYTES:
         try:
-            font = ImageFont.truetype(font_path, size)
+            font = ImageFont.truetype(font_path, size, layout_engine=layout_engine)
             _font_cache[cache_key] = font
             return font
         except Exception:
@@ -87,7 +112,7 @@ def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     for sys_font in _SYSTEM_FALLBACKS:
         if os.path.exists(sys_font):
             try:
-                font = ImageFont.truetype(sys_font, size)
+                font = ImageFont.truetype(sys_font, size, layout_engine=layout_engine)
                 logger.error(
                     "تنبيه: خط Tajawal غير موجود، تم استخدام خط بديل من النظام. "
                     "الرجاء رفع ملفات الخط داخل مجلد المشروع لحل المشكلة نهائياً."
@@ -104,13 +129,46 @@ def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
 
 
 def fix_arabic_text(text: str) -> str:
-    """إعادة تشكيل الحروف العربية وترتيبها بصرياً باستخدام خوارزمية bidi الرسمية.
-    هذا يستبدل العكس اليدوي القديم reshaped[::-1] الذي كان يكسر ترتيب
-    الأرقام والنصوص المختلطة (عربي + إنجليزي/أرقام) مثل الأسعار وأرقام الهاتف."""
+    """تجهيز النص العربي للرسم.
+    - إذا كان RAQM متوفراً (الوضع الطبيعي): لا حاجة لأي معالجة يدوية إطلاقاً،
+      لأن draw_rtl_text أدناه يمرر النص الخام ويترك محرك RAQM يتولى التشكيل
+      والترتيب الصحيحين اعتماداً على جداول OpenType الحقيقية في ملف الخط.
+    - إذا لم يتوفر RAQM (حالة استثنائية): نستخدم كحل احتياطي فقط إعادة
+      التشكيل اليدوي مع ترتيب bidi الرسمي (أدق من العكس اليدوي القديم)."""
     if not text:
         return ""
+    if RAQM_AVAILABLE:
+        return text
     reshaped = arabic_reshaper.reshape(text)
     return get_display(reshaped)
+
+
+def draw_rtl_text(draw: ImageDraw.ImageDraw, xy, text: str, font, fill, anchor: str):
+    """رسم نص عربي بالاتجاه الصحيح من اليمين لليسار.
+    يعتمد على RAQM (direction/language) عند توفره وهو الحل الجذري والدقيق،
+    ويرجع تلقائياً للطريقة اليدوية القديمة فقط إذا كانت بيئة السيرفر لا
+    تحتوي على دعم RAQM ضمن مكتبة Pillow المثبتة."""
+    prepared_text = fix_arabic_text(text)
+    if RAQM_AVAILABLE:
+        try:
+            draw.text(xy, prepared_text, font=font, fill=fill, anchor=anchor, direction="rtl", language="ar")
+            return
+        except Exception as e:
+            logger.warning(f"فشل الرسم عبر RAQM، سيتم استخدام الطريقة الاحتياطية: {e}")
+    draw.text(xy, prepared_text, font=font, fill=fill, anchor=anchor)
+
+
+def measure_rtl_text(draw: ImageDraw.ImageDraw, text: str, font) -> float:
+    """قياس عرض النص العربي بنفس طريقة الرسم بالضبط لضمان توافق القياس مع
+    الشكل الفعلي المرسوم (مهم لحسابات تصغير حجم الخط لمنع القطع)."""
+    prepared_text = fix_arabic_text(text)
+    if RAQM_AVAILABLE:
+        try:
+            bbox = draw.textbbox((0, 0), prepared_text, font=font, direction="rtl", language="ar")
+            return bbox[2] - bbox[0]
+        except Exception:
+            pass
+    return draw.textlength(prepared_text, font=font)
 
 
 # ------------------------------------------------------------------
@@ -218,27 +276,28 @@ def generate_poster(
     font_title = _load_font(int(w * 0.045), bold=True)
     font_promo = _load_font(int(w * 0.024), bold=False)
     font_price = _load_font(int(w * 0.032), bold=True)
-    font_footer = _load_font(int(w * 0.022), bold=False)
 
     text_y = int(h * 0.65)
 
     # اسم المنتج (يمين)
     if product_name and product_name.strip():
-        draw.text(
+        draw_rtl_text(
+            draw,
             (w - int(w * 0.08), text_y),
-            fix_arabic_text(product_name.strip()),
-            fill=(255, 255, 255),
+            product_name.strip(),
             font=font_title,
+            fill=(255, 255, 255),
             anchor="rm",
         )
 
     # السطر التسويقي
     if promo_text and promo_text.strip():
-        draw.text(
+        draw_rtl_text(
+            draw,
             (w - int(w * 0.08), text_y + int(h * 0.055)),
-            fix_arabic_text(promo_text.strip()),
-            fill=(170, 170, 175),
+            promo_text.strip(),
             font=font_promo,
+            fill=(170, 170, 175),
             anchor="rm",
         )
 
@@ -249,11 +308,12 @@ def generate_poster(
         draw.rounded_rectangle(
             [w * 0.08, text_y - 5, w * 0.28, text_y + int(h * 0.055)], radius=8, fill=(215, 25, 32)
         )
-        draw.text(
+        draw_rtl_text(
+            draw,
             (w * 0.18, text_y + int(h * 0.025)),
-            fix_arabic_text(price_display),
-            fill=(255, 255, 255),
+            price_display,
             font=font_price,
+            fill=(255, 255, 255),
             anchor="mm",
         )
 
@@ -281,30 +341,52 @@ def generate_poster(
 
         current_feat_size = int(w * 0.024)
         feat_font = _load_font(current_feat_size, bold=False)
-        feat_display = fix_arabic_text(feat)
 
-        while draw.textlength(feat_display, font=feat_font) > (col_w - int(w * 0.07)) and current_feat_size > 14:
+        while measure_rtl_text(draw, feat, feat_font) > (col_w - int(w * 0.07)) and current_feat_size > 14:
             current_feat_size -= 1
             feat_font = _load_font(current_feat_size, bold=False)
 
-        draw.text(
+        draw_rtl_text(
+            draw,
             (dot_x - int(w * 0.02), cy_center),
-            feat_display,
-            fill=(240, 240, 240),
+            feat,
             font=feat_font,
+            fill=(240, 240, 240),
             anchor="rm",
         )
 
-    # 8. شريط التذييل
-    footer_y = int(h * 0.91)
-    draw.line([(w * 0.08, footer_y), (w * 0.92, footer_y)], fill=(50, 50, 55), width=1)
+    # 8. شريط التذييل - أوضح وأكبر، بسطرين منفصلين لسهولة القراءة
+    footer_line_y = int(h * 0.875)
+    draw.line([(w * 0.08, footer_line_y), (w * 0.92, footer_line_y)], fill=(60, 60, 66), width=1)
 
+    font_footer_name = _load_font(int(w * 0.026), bold=True)
+    font_footer_phone = _load_font(int(w * 0.023), bold=False)
+
+    company_name = company.get("name", "شركة الحلول الجديدة")
+    slogan = company.get("slogan", "لاستيراد وبيع كماليات السيارات")
+
+    # السطر الأول: اسم الشركة بارز وواضح
+    draw_rtl_text(
+        draw,
+        (w / 2, h * 0.915),
+        f"{company_name} {slogan}",
+        font=font_footer_name,
+        fill=(235, 235, 238),
+        anchor="mm",
+    )
+
+    # السطر الثاني: أرقام الهواتف بحجم أكبر ووضوح أعلى
     p1 = company.get("phone1", "0924565333")
     p2 = company.get("phone2", "0914565333")
-    slogan = "الحلول الجديدة لاستيراد وبيع كماليات السيارات"
-    footer_text = f"📞 {p1}   |   📞 {p2}   |   ✨ {slogan}"
-
-    draw.text((w / 2, h * 0.95), fix_arabic_text(footer_text), fill=(150, 150, 150), font=font_footer, anchor="mm")
+    phone_text = f"📞 {p1}   |   📞 {p2}"
+    draw_rtl_text(
+        draw,
+        (w / 2, h * 0.955),
+        phone_text,
+        font=font_footer_phone,
+        fill=(215, 25, 32),
+        anchor="mm",
+    )
 
     # التصدير
     out_name = f"AHL_Perfect_{uuid.uuid4()}.png"
