@@ -19,7 +19,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from config import OUTPUT_SIZES, GENERATED_DIR
 from database import get_company_settings
 from background_removal import remove_background
-from poster_generator import generate_poster
+from poster_generator import generate_poster, get_font_diagnostics, fonts_are_ready
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -109,6 +109,37 @@ async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ تم إلغاء العملية الحالية.")
     await _ask_for_photo(message, state, greeting=False)
+
+
+@router.message(F.text == "/fonts_status")
+async def cmd_fonts_status(message: Message):
+    diag = get_font_diagnostics()
+    lines = ["🔎 **تشخيص حالة الخطوط**\n"]
+    lines.append(f"📁 المسار المطلوب رفع الخطوط بداخله بالضبط:\n`{diag['fonts_dir']}`\n")
+
+    all_ok = True
+    for name, info in diag["files"].items():
+        if info["valid"]:
+            lines.append(f"✅ {name} — موجود وسليم ({info['size_kb']} KB)")
+        elif info["exists"]:
+            lines.append(
+                f"⚠️ {name} — موجود لكن الحجم صغير جداً ({info['size_kb']} KB)، غالباً الملف تالف. ارفعه من جديد."
+            )
+            all_ok = False
+        else:
+            lines.append(f"❌ {name} — غير موجود إطلاقاً في هذا المسار.")
+            all_ok = False
+
+    lines.append("")
+    if all_ok:
+        lines.append("🎉 كل شيء سليم! الخطوط في مكانها الصحيح والنصوص العربية يجب أن تظهر بشكل صحيح.")
+    else:
+        lines.append(
+            "🛠️ يجب رفع ملفي الخط (Tajawal-Bold.ttf و Tajawal-Regular.ttf) داخل المسار "
+            "المذكور أعلاه بالضبط داخل مستودع GitHub، ثم انتظر إعادة نشر Railway تلقائياً."
+        )
+
+    await message.answer("\n".join(lines))
 
 
 @router.callback_query(F.data == "cancel")
@@ -301,10 +332,14 @@ async def got_size(callback: CallbackQuery, state: FSMContext):
         logger.exception("فشل توليد البوستر")
 
     if output_path and os.path.exists(output_path):
-        await callback.message.answer_photo(
-            photo=FSInputFile(output_path),
-            caption="✨ **تم تصدير البوستر بنجاح لشركة الحلول الجديدة!**",
-        )
+        caption = "✨ **تم تصدير البوستر بنجاح لشركة الحلول الجديدة!**"
+        if not fonts_are_ready():
+            caption += (
+                "\n\n⚠️ تنبيه: خط Tajawal غير مضبوط بشكل صحيح على السيرفر، لذلك "
+                "قد تظهر بعض الحروف العربية ناقصة في الصورة أعلاه. أرسل الأمر "
+                "/fonts_status لمعرفة السبب بالتحديد وحله."
+            )
+        await callback.message.answer_photo(photo=FSInputFile(output_path), caption=caption)
         os.remove(output_path)
         await callback.message.answer(
             "يمكنك الآن إرسال صورة منتج جديد مباشرة للبدء من جديد، أو اضغط الزر:",
