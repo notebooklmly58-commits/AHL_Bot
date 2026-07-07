@@ -4,6 +4,7 @@
 import os
 import math
 import requests
+import uuid
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from config import TEMPLATES, OUTPUT_SIZES, FONTS_DIR, GENERATED_DIR
@@ -42,7 +43,7 @@ def generate_poster(
     palette = TEMPLATES.get(template_key, TEMPLATES["luxury_dark"])
     w, h = OUTPUT_SIZES.get(size_key, (1080, 1080))
 
-    # 1. إنشاء الخلفية المتدرجة الفاخرة (Gradient)
+    # 1. إنشاء الخلفية المتدرجة الفاخرة (Gradient) بطبقة RGBA كاملة لدعم الشفافية والتوهج
     base = Image.new("RGBA", (w, h))
     top_color = palette["bg_start"]
     bottom_color = palette["bg_end"]
@@ -58,7 +59,7 @@ def generate_poster(
 
     draw = ImageDraw.Draw(base)
 
-    # 2. إضافة توهج خلفية النيون (Glow Efect) خلف المنتج لإبراز جودته وفخامته
+    # 2. إضافة توهج خلفية النيون (Glow Effect) خلف المنتج لإبراز جودته وفخامته
     glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     glow_draw = ImageDraw.Draw(glow)
     glow_draw.ellipse(
@@ -104,7 +105,7 @@ def generate_poster(
     if promo_text:
         draw.text((w/2, h*0.19), shape_text(promo_text), fill=palette["secondary"], font=promo_font, anchor="mm")
 
-    # 5. السعر بشكل بطاقة دائرية لافتة للنظر (أحمر أو ذهبي)
+    # 5. السعر بشكل بطاقة لافتة للنظر (أحمر أو ذهبي)
     if price:
         price_font = _load_font(int(w * 0.032))
         p_text = shape_text(price)
@@ -144,5 +145,10 @@ def generate_poster(
 
     out_name = f"final_poster_{uuid.uuid4()}.png"
     out_path = os.path.join(GENERATED_DIR, out_name)
-    base.convert("RGB").save(out_path, "JPEG", quality=95)
+    
+    # [تم الإصلاح هنا]: تحويل الصورة إلى RGB بدقة لمنع حدوث التوقف الفجائي (Crash) لحفظ ملفات الـ PNG/JPEG المتداخلة
+    final_image = Image.new("RGB", base.size, (0, 0, 0))
+    final_image.paste(base, mask=base.split()[3]) # دمج القنوات الشفافة بالخلفية
+    final_image.save(out_path, "PNG", quality=95)
+    
     return out_path
