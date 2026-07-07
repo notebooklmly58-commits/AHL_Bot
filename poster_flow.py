@@ -59,10 +59,27 @@ def _size_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def _after_poster_keyboard() -> InlineKeyboardMarkup:
+def _multi_size_keyboard() -> InlineKeyboardMarkup:
+    """لوحة تظهر بعد إنشاء أي بوستر، تتيح توليد نفس المنتج بمقاس آخر
+    مباشرة دون إعادة كتابة الاسم والسعر والمواصفات من جديد."""
+    labels = {
+        "instagram_post": "📺 مربع",
+        "instagram_portrait": "📱 طولي",
+        "story": "📸 ستوري",
+    }
+    size_buttons = [InlineKeyboardButton(text=label, callback_data=f"size:{key}") for key, label in labels.items()]
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🆕 تصميم منتج جديد الآن", callback_data="new_product")]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📐 نفس المنتج بمقاس آخر:", callback_data="noop")],
+            size_buttons,
+            [InlineKeyboardButton(text="🆕 إنهاء وبدء منتج جديد", callback_data="finish_product")],
+        ]
     )
+
+
+@router.callback_query(F.data == "noop")
+async def cb_noop(callback: CallbackQuery):
+    await callback.answer()
 
 
 async def _cleanup_state_files(state: FSMContext):
@@ -151,8 +168,10 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data == "new_product")
-async def cb_new_product(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "finish_product")
+async def cb_finish_product(callback: CallbackQuery, state: FSMContext):
+    await _cleanup_state_files(state)
+    await state.clear()
     await _ask_for_photo(callback.message, state, greeting=False)
     await callback.answer()
 
@@ -187,6 +206,16 @@ async def got_photo(message: Message, state: FSMContext):
 @router.message(PosterFlow.waiting_photo)
 async def waiting_photo_wrong_type(message: Message, state: FSMContext):
     await message.answer("📸 من فضلك أرسل **صورة** المنتج (وليس نصاً أو ملفاً آخر) لبدء التصميم.")
+
+
+@router.message(F.photo)
+async def photo_any_state_restart(message: Message, state: FSMContext):
+    """يسمح بإرسال صورة منتج جديد في أي لحظة (حتى أثناء اختيار مقاسات
+    إضافية لمنتج سابق) لبدء تصميم جديد فوراً دون الحاجة لأي أمر."""
+    await _cleanup_state_files(state)
+    await state.clear()
+    await state.set_state(PosterFlow.waiting_photo)
+    await got_photo(message, state)
 
 
 # ------------------------------------------------------------------
@@ -298,13 +327,19 @@ async def got_promo(message: Message, state: FSMContext):
 
 
 # ------------------------------------------------------------------
-# اختيار المقاس وتوليد البوستر النهائي
+# اختيار المقاس وتوليد البوستر النهائي (يدعم توليد أكثر من مقاس لنفس المنتج)
 # ------------------------------------------------------------------
 @router.callback_query(PosterFlow.waiting_size, F.data.startswith("size:"))
 async def got_size(callback: CallbackQuery, state: FSMContext):
     size_key = callback.data.split(":", 1)[1]
     data = await state.get_data()
-    await callback.message.edit_text("🖌️ جاري رسم وتثبيت البوستر بهندسة التصميم المرجعي الفاخر، ثوانٍ...")
+
+    if not data.get("product_image") or not os.path.exists(data["product_image"]):
+        await callback.answer("⚠️ انتهت صلاحية الصورة. أرسل صورة المنتج من جديد.", show_alert=True)
+        await _ask_for_photo(callback.message, state, greeting=False)
+        return
+
+    await callback.message.answer("🖌️ جاري رسم وتثبيت البوستر بهذا المقاس، ثوانٍ...")
 
     features_list = []
     if data.get("feat1"):
@@ -342,18 +377,17 @@ async def got_size(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer_photo(photo=FSInputFile(output_path), caption=caption)
         os.remove(output_path)
         await callback.message.answer(
-            "يمكنك الآن إرسال صورة منتج جديد مباشرة للبدء من جديد، أو اضغط الزر:",
-            reply_markup=_after_poster_keyboard(),
+            "📐 يمكنك الآن توليد **نفس المنتج بمقاس آخر مباشرة** بدون إعادة كتابة أي بيانات، "
+            "أو إنهاء والبدء بمنتج جديد:",
+            reply_markup=_multi_size_keyboard(),
         )
     else:
         await callback.message.answer(
-            "❌ حدث خطأ فني أثناء تصدير الصورة النهائية. حاول مرة أخرى بصورة منتج جديدة.",
-            reply_markup=_after_poster_keyboard(),
+            "❌ حدث خطأ فني أثناء تصدير الصورة. جرّب مقاساً آخر أو ابدأ من جديد:",
+            reply_markup=_multi_size_keyboard(),
         )
 
-    await _cleanup_state_files(state)
     gc.collect()
-
-    # الميزة الأهم: العودة تلقائياً لانتظار صورة المنتج التالي دون الحاجة لـ /start
-    await state.set_state(PosterFlow.waiting_photo)
+    # نبقى في نفس حالة اختيار المقاس عمداً للسماح بتوليد مقاسات إضافية
+    # لنفس المنتج دون حذف الصورة أو إعادة كتابة البيانات.
     await callback.answer()
