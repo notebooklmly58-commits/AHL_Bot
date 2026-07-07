@@ -128,7 +128,30 @@ def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     return font
 
 
-def fix_arabic_text(text: str) -> str:
+def get_font_diagnostics() -> dict:
+    """تشخيص فوري وواضح لحالة ملفات الخط - ليُستخدم في أمر تشخيصي داخل
+    البوت نفسه، فلا يحتاج المستخدم لفتح Railway أو مراجعة الأكواد."""
+    os.makedirs(FONTS_DIR, exist_ok=True)
+    results = {"fonts_dir": FONTS_DIR, "raqm_available": RAQM_AVAILABLE, "files": {}}
+    for name in ("Tajawal-Bold.ttf", "Tajawal-Regular.ttf"):
+        path = os.path.join(FONTS_DIR, name)
+        exists = os.path.exists(path)
+        size = os.path.getsize(path) if exists else 0
+        results["files"][name] = {
+            "path": path,
+            "exists": exists,
+            "size_kb": round(size / 1024, 1),
+            "valid": exists and size > _MIN_VALID_FONT_BYTES,
+        }
+    return results
+
+
+def fonts_are_ready() -> bool:
+    diag = get_font_diagnostics()
+    return all(f["valid"] for f in diag["files"].values())
+
+
+
     """تجهيز النص العربي للرسم.
     - إذا كان RAQM متوفراً (الوضع الطبيعي): لا حاجة لأي معالجة يدوية إطلاقاً،
       لأن draw_rtl_text أدناه يمرر النص الخام ويترك محرك RAQM يتولى التشكيل
@@ -362,8 +385,8 @@ def generate_poster(
     font_footer_name = _load_font(int(w * 0.026), bold=True)
     font_footer_phone = _load_font(int(w * 0.023), bold=False)
 
-    company_name = company.get("name", "شركة الحلول الجديدة")
-    slogan = company.get("slogan", "لاستيراد وبيع كماليات السيارات")
+    company_name = company.get("company_name") or company.get("name") or "شركة الحلول الجديدة"
+    slogan = company.get("company_slogan") or company.get("slogan") or "لاستيراد وبيع كماليات السيارات"
 
     # السطر الأول: اسم الشركة بارز وواضح
     draw_rtl_text(
