@@ -6,12 +6,31 @@
 """
 import os
 import uuid
+import gc
+import ctypes
 import logging
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, features
 from config import OUTPUT_SIZES, FONTS_DIR, LOGO_DIR, GENERATED_DIR
 import arabic_reshaper
 from bidi.algorithm import get_display
+
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+except Exception:
+    _libc = None
+
+
+def _release_memory_to_os():
+    """إجبار نظام التشغيل على استرجاع الذاكرة المُحررة فعلياً (Linux فقط).
+    نفس الآلية المستخدمة في background_removal.py لحل مشكلة تراكم استهلاك
+    الذاكرة على Railway مع كل صورة/بوستر جديد."""
+    gc.collect()
+    if _libc:
+        try:
+            _libc.malloc_trim(0)
+        except Exception:
+            pass
 
 logger = logging.getLogger(__name__)
 
@@ -430,5 +449,13 @@ def generate_poster(
     final_image = Image.new("RGB", base.size, (15, 15, 18))
     final_image.paste(base, mask=base.split()[3])
     final_image.save(out_path, "PNG", quality=100)
+
+    # إغلاق الصور الوسيطة الكبيرة (القماشة الأساسية بحجم البوستر الكامل)
+    # صراحة، ثم إجبار نظام التشغيل على استرجاع الذاكرة فعلياً - هذا يمنع
+    # تراكم استهلاك الذاكرة عبر توليد بوسترات متعددة في نفس الجلسة.
+    final_image.close()
+    base.close()
+    del final_image, base
+    _release_memory_to_os()
 
     return out_path
