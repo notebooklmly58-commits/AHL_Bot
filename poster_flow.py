@@ -10,6 +10,7 @@
 import os
 import uuid
 import gc
+import asyncio
 import logging
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
@@ -23,6 +24,13 @@ from poster_generator import generate_poster, get_font_diagnostics, fonts_are_re
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+# حد أقصى لعدد عمليات معالجة الصور الثقيلة (إزالة الخلفية + رسم البوستر)
+# التي تعمل في نفس اللحظة بالضبط، بغض النظر عن عدد المستخدمين المتزامنين.
+# هذا يوازن بين الاستجابة السريعة للجميع وعدم استنزاف ذاكرة السيرفر إذا
+# أرسل عدة أشخاص صوراً في نفس الوقت بالضبط. يمكن رفع الرقم إلى 3 لاحقاً
+# إذا كانت خطة Railway لديك تحتوي ذاكرة كافية (راجع تبويب Metrics).
+_PROCESSING_SEMAPHORE = asyncio.Semaphore(2)
 
 
 class PosterFlow(StatesGroup):
@@ -188,7 +196,13 @@ async def got_photo(message: Message, state: FSMContext):
 
     try:
         await message.bot.download(photo, destination=raw_path)
-        remove_background(raw_path, clean_path)
+        # تشغيل إزالة الخلفية (عملية ثقيلة على المعالج) في خيط منفصل بدل
+        # حجب حلقة الأحداث الرئيسية للبوت بالكامل. بدون هذا، أي مستخدم
+        # آخر يرسل رسالة أثناء معالجة صورة شخص آخر سيبقى بلا رد حتى تنتهي
+        # المعالجة الأولى تماماً. الـ Semaphore يحدد عدد الصور التي تُعالج
+        # في نفس اللحظة لمنع استهلاك ذاكرة زائد عند تزاحم عدة مستخدمين.
+        async with _PROCESSING_SEMAPHORE:
+            await asyncio.to_thread(remove_background, raw_path, clean_path)
         await state.update_data(product_image=clean_path, raw_image=raw_path)
         await msg.edit_text(
             "✅ تم تجهيز صورة المنتج بنجاح!\n\n✍️ الآن أرسل **اسم المنتج** (مثال: شاشات أندرويد الذكية):"
@@ -352,17 +366,22 @@ async def got_size(callback: CallbackQuery, state: FSMContext):
     output_path = None
     try:
         company = get_company_settings()
-        output_path = generate_poster(
-            product_image_path=data["product_image"],
-            product_name=data["product_name"],
-            price=data.get("price", ""),
-            features=features_list,
-            socket="",
-            promo_text=data.get("promo_text", ""),
-            company=company,
-            template_key="luxury_black",
-            size_key=size_key,
-        )
+        # نفس مبدأ إزالة الخلفية: تشغيل الرسم (عملية ثقيلة أيضاً) في خيط
+        # منفصل حتى لا تتجمد بقية المحادثات مع مستخدمين آخرين أثناء رسم
+        # بوستر شخص آخر.
+        async with _PROCESSING_SEMAPHORE:
+            output_path = await asyncio.to_thread(
+                generate_poster,
+                product_image_path=data["product_image"],
+                product_name=data["product_name"],
+                price=data.get("price", ""),
+                features=features_list,
+                socket="",
+                promo_text=data.get("promo_text", ""),
+                company=company,
+                template_key="luxury_black",
+                size_key=size_key,
+            )
     except Exception:
         logger.exception("فشل توليد البوستر")
 
