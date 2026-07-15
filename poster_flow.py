@@ -178,65 +178,6 @@ async def cmd_fonts_status(message: Message):
     await message.answer("\n".join(lines))
 
 
-@router.callback_query(F.data == "cancel")
-async def cb_cancel(callback: CallbackQuery, state: FSMContext):
-    await _cleanup_state_files(state)
-    await state.clear()
-    await callback.message.edit_text("❌ تم إلغاء العملية الحالية.")
-    await _ask_for_photo(callback.message, state, greeting=False)
-    await callback.answer()
-
-
-@router.callback_query(F.data == "finish_product")
-async def cb_finish_product(callback: CallbackQuery, state: FSMContext):
-    await _cleanup_state_files(state)
-    await state.clear()
-    await _ask_for_photo(callback.message, state, greeting=False)
-    await callback.answer()
-
-
-# ------------------------------------------------------------------
-# استقبال الصورة
-# ------------------------------------------------------------------
-@router.message(PosterFlow.waiting_photo, F.photo)
-async def got_photo(message: Message, state: FSMContext):
-    photo = message.photo[-1]
-    msg = await message.answer("⏳ جاري سحب الصورة وإزالة الخلفية وتحسين جودة المنتج برمجياً...")
-    raw_path = f"raw_{uuid.uuid4()}.png"
-    clean_path = f"clean_{uuid.uuid4()}.png"
-
-    try:
-        await message.bot.download(photo, destination=raw_path)
-        # تشغيل إزالة الخلفية (عملية ثقيلة على المعالج) في خيط منفصل بدل
-        # حجب حلقة الأحداث الرئيسية للبوت بالكامل. بدون هذا، أي مستخدم
-        # آخر يرسل رسالة أثناء معالجة صورة شخص آخر سيبقى بلا رد حتى تنتهي
-        # المعالجة الأولى تماماً. الـ Semaphore يحدد عدد الصور التي تُعالج
-        # في نفس اللحظة لمنع استهلاك ذاكرة زائد عند تزاحم عدة مستخدمين.
-        async with _PROCESSING_SEMAPHORE:
-            await asyncio.to_thread(remove_background, raw_path, clean_path)
-        await state.update_data(product_image=clean_path, raw_image=raw_path)
-        await msg.edit_text(
-            "✅ تم تجهيز صورة المنتج بنجاح!\n\n✍️ الآن أرسل **اسم المنتج** (مثال: شاشات أندرويد الذكية):"
-        )
-        await state.set_state(PosterFlow.waiting_name)
-    except Exception as e:
-        logger.exception("فشل في معالجة الصورة")
-        await msg.edit_text(
-            "❌ حدث خطأ أثناء معالجة الصورة. تأكد أنها صورة واضحة للمنتج وحاول إرسالها مجدداً."
-        )
-        if os.path.exists(raw_path):
-            os.remove(raw_path)
-
-
-@router.message(PosterFlow.waiting_photo)
-async def waiting_photo_wrong_type(message: Message, state: FSMContext):
-    await message.answer("📸 من فضلك أرسل **صورة** المنتج (وليس نصاً أو ملفاً آخر) لبدء التصميم.")
-
-
-# ------------------------------------------------------------------
-# الوضع السريع: بوستر فوري لكل صورة، بمواصفات ثابتة (جودة عالية / أسعار
-# منافسة)، مع خيار وجود اسم منتج أو عدمه حسب اختيار المستخدم في أي وقت.
-# ------------------------------------------------------------------
 _QUICK_FEATURES = ["جودة عالية", "أسعار منافسة"]
 _QUICK_DEFAULT_SIZE = "instagram_post"
 
@@ -426,6 +367,66 @@ async def quick_got_name(message: Message, state: FSMContext):
     await _quick_generate(message, state, product_name=message.text.strip())
 
 
+
+@router.callback_query(F.data == "cancel")
+async def cb_cancel(callback: CallbackQuery, state: FSMContext):
+    await _cleanup_state_files(state)
+    await state.clear()
+    await callback.message.edit_text("❌ تم إلغاء العملية الحالية.")
+    await _ask_for_photo(callback.message, state, greeting=False)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "finish_product")
+async def cb_finish_product(callback: CallbackQuery, state: FSMContext):
+    await _cleanup_state_files(state)
+    await state.clear()
+    await _ask_for_photo(callback.message, state, greeting=False)
+    await callback.answer()
+
+
+# ------------------------------------------------------------------
+# استقبال الصورة
+# ------------------------------------------------------------------
+@router.message(PosterFlow.waiting_photo, F.photo)
+async def got_photo(message: Message, state: FSMContext):
+    photo = message.photo[-1]
+    msg = await message.answer("⏳ جاري سحب الصورة وإزالة الخلفية وتحسين جودة المنتج برمجياً...")
+    raw_path = f"raw_{uuid.uuid4()}.png"
+    clean_path = f"clean_{uuid.uuid4()}.png"
+
+    try:
+        await message.bot.download(photo, destination=raw_path)
+        # تشغيل إزالة الخلفية (عملية ثقيلة على المعالج) في خيط منفصل بدل
+        # حجب حلقة الأحداث الرئيسية للبوت بالكامل. بدون هذا، أي مستخدم
+        # آخر يرسل رسالة أثناء معالجة صورة شخص آخر سيبقى بلا رد حتى تنتهي
+        # المعالجة الأولى تماماً. الـ Semaphore يحدد عدد الصور التي تُعالج
+        # في نفس اللحظة لمنع استهلاك ذاكرة زائد عند تزاحم عدة مستخدمين.
+        async with _PROCESSING_SEMAPHORE:
+            await asyncio.to_thread(remove_background, raw_path, clean_path)
+        await state.update_data(product_image=clean_path, raw_image=raw_path)
+        await msg.edit_text(
+            "✅ تم تجهيز صورة المنتج بنجاح!\n\n✍️ الآن أرسل **اسم المنتج** (مثال: شاشات أندرويد الذكية):"
+        )
+        await state.set_state(PosterFlow.waiting_name)
+    except Exception as e:
+        logger.exception("فشل في معالجة الصورة")
+        await msg.edit_text(
+            "❌ حدث خطأ أثناء معالجة الصورة. تأكد أنها صورة واضحة للمنتج وحاول إرسالها مجدداً."
+        )
+        if os.path.exists(raw_path):
+            os.remove(raw_path)
+
+
+@router.message(PosterFlow.waiting_photo)
+async def waiting_photo_wrong_type(message: Message, state: FSMContext):
+    await message.answer("📸 من فضلك أرسل **صورة** المنتج (وليس نصاً أو ملفاً آخر) لبدء التصميم.")
+
+
+# ------------------------------------------------------------------
+# الوضع السريع: بوستر فوري لكل صورة، بمواصفات ثابتة (جودة عالية / أسعار
+# منافسة)، مع خيار وجود اسم منتج أو عدمه حسب اختيار المستخدم في أي وقت.
+# ------------------------------------------------------------------
 @router.message(F.photo)
 async def photo_any_state_restart(message: Message, state: FSMContext):
     """يسمح بإرسال صورة منتج جديد في أي لحظة (حتى أثناء اختيار مقاسات
