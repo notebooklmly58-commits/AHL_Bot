@@ -34,6 +34,24 @@ router = Router()
 # (راجع تبويب Metrics في Railway).
 _PROCESSING_SEMAPHORE = asyncio.Semaphore(1)
 
+# قفل مستقل لكل مستخدم: يضمن أن الصورة التالية من نفس الشخص لا تبدأ
+# تنزيلها أو معالجتها إطلاقاً قبل اكتمال معالجة الصورة الحالية بالكامل.
+# بدون هذا، إرسال عدة صور دفعة واحدة (مثل ألبوم من 25 صورة) كان يجعل
+# البوت يبدأ تنزيل ومعالجة كل الصور في نفس اللحظة تقريباً (حتى مع وجود
+# _PROCESSING_SEMAPHORE، لأن التنزيل نفسه كان يحدث قبل انتظار القفل)،
+# فيرتفع استهلاك الذاكرة دفعة واحدة بما يتناسب مع عدد الصور المُرسلة
+# وينهار البوت. الآن: أي صورة إضافية تدخل "طابور انتظار" تلقائياً وتُعالج
+# بالترتيب، واحدة تلو الأخرى فقط.
+_user_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_user_lock(user_id: int) -> asyncio.Lock:
+    lock = _user_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _user_locks[user_id] = lock
+    return lock
+
 
 class PosterFlow(StatesGroup):
     waiting_photo = State()
@@ -116,6 +134,35 @@ async def _cleanup_state_files(state: FSMContext):
 # ------------------------------------------------------------------
 # البداية
 # ------------------------------------------------------------------
+HELP_TEXT = (
+    "📋 **كل ميزات وأوامر بوت شركة الحلول الجديدة**\n\n"
+    "**🖼️ الوضع العادي (خطوة بخطوة):**\n"
+    "أرسل صورة المنتج → الاسم → السعر (أو تخطي) → حتى 3 مواصفات (أو تخطي) "
+    "→ عرض ترويجي (أو تخطي) → اختر المقاس، ويصمم البوستر تلقائياً.\n"
+    "بعد كل بوستر يمكنك توليد نفس المنتج بمقاس آخر مباشرة، أو البدء بمنتج "
+    "جديد بمجرد إرسال صورة جديدة (بدون الحاجة لـ /start مجدداً).\n\n"
+    "**🚀 الوضع السريع /quick:**\n"
+    "لتصميم عدة منتجات بسرعة (حتى دفعات كبيرة من الصور). مواصفات ثابتة "
+    "دائماً: \"جودة عالية\" و\"أسعار منافسة\"، بدون سعر أو عرض ترويجي.\n"
+    "خياران قابلان للتبديل في أي وقت عبر /quick:\n"
+    "  • 📝 يسأل عن اسم كل منتج فقط\n"
+    "  • ⚡ بدون أي أسئلة إطلاقاً\n"
+    "💡 إن كتبت وصفاً (Caption) على الصورة عند إرسالها، يُستخدم تلقائياً "
+    "كاسم المنتج فوراً في الحالتين.\n"
+    "/quick_size لتغيير مقاس التصميم الافتراضي في الوضع السريع.\n\n"
+    "**📦 إرسال عدة صور دفعة واحدة:**\n"
+    "يمكنك إرسال أي عدد من الصور معاً (يُفضّل عبر الوضع السريع). يعالجها "
+    "البوت **واحدة تلو الأخرى** تلقائياً بالترتيب لضمان الاستقرار وعدم "
+    "انهيار الذاكرة - لا حاجة لانتظار كل صورة يدوياً، فقط أرسلها كلها "
+    "وستصلك النتائج بالتتابع.\n\n"
+    "**⚙️ أوامر عامة:**\n"
+    "/start — بدء جلسة جديدة (يمسح أي عملية جارية)\n"
+    "/cancel — إلغاء العملية الحالية فقط\n"
+    "/help — عرض هذه القائمة في أي وقت\n"
+    "/fonts_status — تشخيص فوري لحالة خطوط اللغة العربية على السيرفر"
+)
+
+
 async def _ask_for_photo(message: Message, state: FSMContext, greeting: bool = True):
     if greeting:
         text = (
@@ -132,7 +179,13 @@ async def _ask_for_photo(message: Message, state: FSMContext, greeting: bool = T
 async def cmd_start(message: Message, state: FSMContext):
     await _cleanup_state_files(state)
     await state.clear()
+    await message.answer(HELP_TEXT)
     await _ask_for_photo(message, state, greeting=True)
+
+
+@router.message(F.text == "/help")
+async def cmd_help(message: Message):
+    await message.answer(HELP_TEXT)
 
 
 @router.message(F.text == "/cancel")
@@ -326,45 +379,66 @@ async def _quick_generate(message: Message, state: FSMContext, product_name: str
 
 @router.message(QuickFlow.active, F.photo)
 async def quick_got_photo(message: Message, state: FSMContext):
-    data = await state.get_data()
-    photo = message.photo[-1]
-    msg = await message.answer("⏳ جاري تجهيز الصورة...")
-    raw_path = f"raw_{uuid.uuid4()}.png"
-    clean_path = f"clean_{uuid.uuid4()}.png"
+    lock = _get_user_lock(message.from_user.id)
+    if lock.locked():
+        await message.answer("🕐 استلمتها، في الطابور - سأصممها فور الانتهاء من الصورة الحالية.")
 
-    try:
-        await message.bot.download(photo, destination=raw_path)
-        async with _PROCESSING_SEMAPHORE:
-            await asyncio.to_thread(remove_background, raw_path, clean_path)
-    except Exception:
-        logger.exception("فشل تجهيز صورة الوضع السريع")
-        await msg.edit_text("❌ حدث خطأ في معالجة الصورة، حاول إرسالها مجدداً.")
-        if os.path.exists(raw_path):
-            os.remove(raw_path)
-        return
+    async with lock:
+        data = await state.get_data()
+        photo = message.photo[-1]
+        msg = await message.answer("⏳ جاري تجهيز الصورة...")
+        raw_path = f"raw_{uuid.uuid4()}.png"
+        clean_path = f"clean_{uuid.uuid4()}.png"
 
-    await state.update_data(product_image=clean_path, raw_image=raw_path)
+        try:
+            await message.bot.download(photo, destination=raw_path)
+            async with _PROCESSING_SEMAPHORE:
+                await asyncio.to_thread(remove_background, raw_path, clean_path)
+        except Exception:
+            logger.exception("فشل تجهيز صورة الوضع السريع")
+            await msg.edit_text("❌ حدث خطأ في معالجة الصورة، حاول إرسالها مجدداً.")
+            if os.path.exists(raw_path):
+                os.remove(raw_path)
+            return
 
-    # وصف الصورة (Caption) عند الإرسال يُستخدم تلقائياً كاسم المنتج إن
-    # وُجد، بغض النظر عن الخيار المفعّل - يوفر إرسالاً دفعياً سريعاً جداً.
-    caption_name = (message.caption or "").strip()
-    if caption_name:
-        await msg.delete()
-        await _quick_generate(message, state, product_name=caption_name)
-        return
+        await state.update_data(product_image=clean_path, raw_image=raw_path)
 
-    if data.get("quick_with_name"):
-        await msg.edit_text("✍️ اسم هذا المنتج؟")
-        await state.set_state(QuickFlow.waiting_name)
-    else:
-        await msg.delete()
-        await _quick_generate(message, state, product_name="")
+        # وصف الصورة (Caption) عند الإرسال يُستخدم تلقائياً كاسم المنتج إن
+        # وُجد، بغض النظر عن الخيار المفعّل - يوفر إرسالاً دفعياً سريعاً جداً.
+        caption_name = (message.caption or "").strip()
+        if caption_name:
+            await msg.delete()
+            # التوليد يبقى داخل نفس القفل عمداً: الصورة التالية في الطابور لن
+            # تبدأ تنزيلها إلا بعد اكتمال تصميم البوستر الحالي وإرساله بالكامل.
+            await _quick_generate(message, state, product_name=caption_name)
+            return
+
+        if data.get("quick_with_name"):
+            await msg.edit_text("✍️ اسم هذا المنتج؟")
+            await state.set_state(QuickFlow.waiting_name)
+            # هنا فقط يُفرَج عن القفل قبل اكتمال التصميم، لأن البوت ينتظر رد
+            # المستخدم بالاسم بشكل طبيعي (لا يوجد عمل ثقيل معلّق أثناء الانتظار).
+        else:
+            await msg.delete()
+            await _quick_generate(message, state, product_name="")
 
 
 @router.message(QuickFlow.waiting_name, F.text)
 async def quick_got_name(message: Message, state: FSMContext):
     await state.set_state(QuickFlow.active)
-    await _quick_generate(message, state, product_name=message.text.strip())
+    async with _get_user_lock(message.from_user.id):
+        await _quick_generate(message, state, product_name=message.text.strip())
+
+
+@router.message(QuickFlow.waiting_name, F.photo)
+async def quick_waiting_name_got_photo(message: Message, state: FSMContext):
+    """حماية من الالتباس: لو وصلت صورة جديدة بينما البوت ينتظر منك اسم
+    المنتج السابق، لا نُلغي الوضع السريع بصمت - بل نطلب إكمال الخطوة
+    الحالية أولاً حتى يبقى البوت "مركّزاً" على صورة واحدة في كل مرة."""
+    await message.answer(
+        "✍️ من فضلك أرسل أولاً **اسم المنتج السابق** (الصورة التي أرسلتها قبل قليل)، "
+        "وسأنتقل بعدها مباشرة لهذه الصورة الجديدة."
+    )
 
 
 
@@ -390,32 +464,37 @@ async def cb_finish_product(callback: CallbackQuery, state: FSMContext):
 # ------------------------------------------------------------------
 @router.message(PosterFlow.waiting_photo, F.photo)
 async def got_photo(message: Message, state: FSMContext):
-    photo = message.photo[-1]
-    msg = await message.answer("⏳ جاري سحب الصورة وإزالة الخلفية وتحسين جودة المنتج برمجياً...")
-    raw_path = f"raw_{uuid.uuid4()}.png"
-    clean_path = f"clean_{uuid.uuid4()}.png"
+    lock = _get_user_lock(message.from_user.id)
+    if lock.locked():
+        await message.answer("🕐 استلمت الصورة، وهي الآن في الطابور - سأعالجها فور انتهاء الصورة الحالية.")
 
-    try:
-        await message.bot.download(photo, destination=raw_path)
-        # تشغيل إزالة الخلفية (عملية ثقيلة على المعالج) في خيط منفصل بدل
-        # حجب حلقة الأحداث الرئيسية للبوت بالكامل. بدون هذا، أي مستخدم
-        # آخر يرسل رسالة أثناء معالجة صورة شخص آخر سيبقى بلا رد حتى تنتهي
-        # المعالجة الأولى تماماً. الـ Semaphore يحدد عدد الصور التي تُعالج
-        # في نفس اللحظة لمنع استهلاك ذاكرة زائد عند تزاحم عدة مستخدمين.
-        async with _PROCESSING_SEMAPHORE:
-            await asyncio.to_thread(remove_background, raw_path, clean_path)
-        await state.update_data(product_image=clean_path, raw_image=raw_path)
-        await msg.edit_text(
-            "✅ تم تجهيز صورة المنتج بنجاح!\n\n✍️ الآن أرسل **اسم المنتج** (مثال: شاشات أندرويد الذكية):"
-        )
-        await state.set_state(PosterFlow.waiting_name)
-    except Exception as e:
-        logger.exception("فشل في معالجة الصورة")
-        await msg.edit_text(
-            "❌ حدث خطأ أثناء معالجة الصورة. تأكد أنها صورة واضحة للمنتج وحاول إرسالها مجدداً."
-        )
-        if os.path.exists(raw_path):
-            os.remove(raw_path)
+    async with lock:
+        photo = message.photo[-1]
+        msg = await message.answer("⏳ جاري سحب الصورة وإزالة الخلفية وتحسين جودة المنتج برمجياً...")
+        raw_path = f"raw_{uuid.uuid4()}.png"
+        clean_path = f"clean_{uuid.uuid4()}.png"
+
+        try:
+            await message.bot.download(photo, destination=raw_path)
+            # تشغيل إزالة الخلفية (عملية ثقيلة على المعالج) في خيط منفصل بدل
+            # حجب حلقة الأحداث الرئيسية للبوت بالكامل. بدون هذا، أي مستخدم
+            # آخر يرسل رسالة أثناء معالجة صورة شخص آخر سيبقى بلا رد حتى تنتهي
+            # المعالجة الأولى تماماً. الـ Semaphore يحدد عدد الصور التي تُعالج
+            # في نفس اللحظة لمنع استهلاك ذاكرة زائد عند تزاحم عدة مستخدمين.
+            async with _PROCESSING_SEMAPHORE:
+                await asyncio.to_thread(remove_background, raw_path, clean_path)
+            await state.update_data(product_image=clean_path, raw_image=raw_path)
+            await msg.edit_text(
+                "✅ تم تجهيز صورة المنتج بنجاح!\n\n✍️ الآن أرسل **اسم المنتج** (مثال: شاشات أندرويد الذكية):"
+            )
+            await state.set_state(PosterFlow.waiting_name)
+        except Exception as e:
+            logger.exception("فشل في معالجة الصورة")
+            await msg.edit_text(
+                "❌ حدث خطأ أثناء معالجة الصورة. تأكد أنها صورة واضحة للمنتج وحاول إرسالها مجدداً."
+            )
+            if os.path.exists(raw_path):
+                os.remove(raw_path)
 
 
 @router.message(PosterFlow.waiting_photo)
