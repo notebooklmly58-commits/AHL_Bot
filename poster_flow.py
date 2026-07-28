@@ -44,8 +44,21 @@ _PROCESSING_SEMAPHORE = asyncio.Semaphore(1)
 # بالترتيب، واحدة تلو الأخرى فقط.
 _user_locks: dict[int, asyncio.Lock] = {}
 
+# حد أقصى لعدد المستخدمين المخزّنين في قاموس الأقفال. بدون هذا الحد، أي
+# بوت يعمل باستمرار لأسابيع (مثل هذا البوت على Railway) سيراكم قفلاً واحداً
+# لكل مستخدم استخدمه ولو مرة واحدة فقط، بدون أن يُحذف أبداً - تسريب ذاكرة
+# بطيء لكنه مستمر مع الوقت. عند تجاوز الحد، نُبقي فقط الأقفال المُستخدمة
+# حالياً (locked) ونحذف البقية بأمان (قفل غير مُستخدم يُعاد إنشاؤه تلقائياً
+# عند الحاجة، فحذفه لا يُفقد أي حالة فعلية).
+_MAX_TRACKED_USER_LOCKS = 2000
+
 
 def _get_user_lock(user_id: int) -> asyncio.Lock:
+    if len(_user_locks) > _MAX_TRACKED_USER_LOCKS:
+        for uid, lk in list(_user_locks.items()):
+            if not lk.locked():
+                del _user_locks[uid]
+
     lock = _user_locks.get(user_id)
     if lock is None:
         lock = asyncio.Lock()
