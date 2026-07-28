@@ -17,7 +17,13 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 os.environ.setdefault("ORT_NUM_THREADS", "1")
 
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image, ImageFile, ImageFilter, ImageEnhance
+
+# تليجرام أحياناً يرسل ملفات JPEG "شبه مكتملة" (خصوصاً الصور المضغوطة أو
+# المرسلة بسرعة من الجوال)، وبدون هذا السطر يرفض Pillow فتحها بالكامل
+# برسالة "image file is truncated" فتفشل المعالجة برسالة عامة غير مفهومة.
+# هذا الإعداد يجعل Pillow يقبل فتح الجزء المتاح من الصورة بدل التوقف.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 def process_image_in_subprocess(input_path: str, output_path: str, max_dimension: int) -> None:
@@ -65,6 +71,18 @@ def process_image_in_subprocess(input_path: str, output_path: str, max_dimension
 
     img = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
     del output_bytes
+
+    # تحقّق أن النموذج فعلاً "وجد" منتجاً في الصورة قبل المتابعة. لو كانت
+    # الصورة معقدة جداً أو المنتج غير واضح، أحياناً ينتج rembg صورة شفافة
+    # بالكامل تقريباً - وبدون هذا التحقق كان البوستر يُصمّم لاحقاً بمنتج
+    # "فارغ" غير مرئي، وهو أسوأ من رسالة خطأ واضحة تطلب صورة أوضح.
+    bbox = img.getbbox()
+    if bbox is None:
+        raise ValueError("لم يتم العثور على منتج واضح في الصورة (الناتج شفاف بالكامل)")
+    visible_ratio = ((bbox[2] - bbox[0]) * (bbox[3] - bbox[1])) / (img.width * img.height)
+    if visible_ratio < 0.01:
+        raise ValueError("المنتج المكتشف في الصورة صغير جداً أو غير واضح")
+
     img = _auto_enhance(img)
     img.save(output_path, "PNG")
     img.close()
