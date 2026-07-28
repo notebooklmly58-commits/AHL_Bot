@@ -239,6 +239,51 @@ def _vertical_gradient(w: int, h: int, top_color, bottom_color) -> Image.Image:
     return column.resize((w, h))
 
 
+def _lerp_color(c1, c2, t: float):
+    return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
+
+
+def _radial_stage_gradient(w: int, h: int, center_ratio, stops, small: int = 96) -> Image.Image:
+    """تدرج شعاعي احترافي (Radial): يبدأ أبيض/فاتح عند موضع المنتج بالضبط
+    ثم يتدرج تدريجياً إلى الأحمر ثم إلى الأسود الداكن باتجاه حواف الصورة -
+    تأثير "الإضاءة المسرحية" (Spotlight) المستخدم في تصوير المنتجات
+    الاحترافي، ويحل مشكلة اختفاء الأصناف الداكنة داخل خلفية داكنة لأن
+    المنتج يقع دائماً على أفتح نقطة في كامل التصميم.
+
+    يُحسب على شبكة صغيرة (small×small فقط) ثم تُكبَّر بالكامل بدل حساب كل
+    بكسل من الصورة الكاملة يدوياً، لأن ذلك كان سيكون بطيئاً وثقيلاً على
+    المعالج ضمن حدود خطة Railway المجانية.
+
+    stops: قائمة (المسافة من 0 إلى 1، اللون) مرتبة تصاعدياً حسب المسافة."""
+    cx, cy = center_ratio
+    max_dist = max(
+        (cx ** 2 + cy ** 2) ** 0.5,
+        ((1 - cx) ** 2 + cy ** 2) ** 0.5,
+        (cx ** 2 + (1 - cy) ** 2) ** 0.5,
+        ((1 - cx) ** 2 + (1 - cy) ** 2) ** 0.5,
+    ) or 1.0
+
+    grid = Image.new("RGB", (small, small))
+    put = grid.putpixel
+    for gy in range(small):
+        ny = gy / (small - 1)
+        dy = ny - cy
+        for gx in range(small):
+            nx = gx / (small - 1)
+            dx = nx - cx
+            d = min(((dx * dx) + (dy * dy)) ** 0.5 / max_dist, 1.0)
+
+            for i in range(len(stops) - 1):
+                d0, c0 = stops[i]
+                d1, c1 = stops[i + 1]
+                if d <= d1 or i == len(stops) - 2:
+                    t = 0.0 if d1 == d0 else max(0.0, min(1.0, (d - d0) / (d1 - d0)))
+                    put((gx, gy), _lerp_color(c0, c1, t))
+                    break
+
+    return grid.resize((w, h), Image.Resampling.BICUBIC)
+
+
 def _prepare_logo(logo_path: str, target_w: int) -> Image.Image:
     """قص الهوامش الشفافة الزائدة من اللوقو وتوحيد حجمه، لضمان ثبات شكله
     في كل بوستر بدل أن يظهر بحجم/تموضع مختلف حسب ملف اللوقو الأصلي."""
@@ -269,18 +314,46 @@ def generate_poster(
     base = Image.new("RGBA", (w, h))
     draw = ImageDraw.Draw(base)
 
-    # 1. الخلفية الفاخرة المتدرجة (أسود ملكي داكن جداً) - نسخة سريعة
-    top_color = (15, 15, 18)
-    bottom_color = (35, 12, 15)
-    gradient = _vertical_gradient(w, h, top_color, bottom_color).convert("RGBA")
-    base.alpha_composite(gradient)
+    # 1. تجهيز صورة المنتج مسبقاً (قبل رسم الخلفية) - التصميم الجديد يحتاج
+    #    معرفة موضع المنتج بالضبط أولاً، حتى تُرسم الخلفية فاتحة عنده تحديداً
+    #    وتتدرج نحو الأحمر ثم الداكن كلما ابتعدنا عنه.
+    p_img = None
+    px = py = 0
+    center_ratio = (0.5, 0.38)  # قيمة افتراضية لو ما وصلت صورة منتج لأي سبب
+    if os.path.exists(product_image_path):
+        p_img = Image.open(product_image_path).convert("RGBA")
+        p_img = ImageOps.exif_transpose(p_img)
 
-    # 2. هالة التوهج الخلفي (Neon Glow)
-    glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    glow_draw = ImageDraw.Draw(glow)
-    glow_draw.ellipse([w * 0.15, h * 0.22, w * 0.85, h * 0.58], fill=(220, 25, 35, 28))
-    glow = glow.filter(ImageFilter.GaussianBlur(w * 0.08))
-    base.alpha_composite(glow)
+        # قص أي هامش شفاف حول الصنف الفعلي (ناتج عن إزالة الخلفية)، حتى
+        # يتم حساب الحجم بناءً على أبعاد الصنف الحقيقية فقط.
+        bbox = p_img.getbbox()
+        if bbox:
+            p_img = p_img.crop(bbox)
+
+        # مساحة العرض المتاحة للمنتج، مع تكبير/تصغير نسبي يملأها دائماً
+        max_p_w, max_p_h = int(w * 0.62), int(h * 0.36)
+        scale = min(max_p_w / p_img.width, max_p_h / p_img.height)
+        new_w = max(1, round(p_img.width * scale))
+        new_h = max(1, round(p_img.height * scale))
+        p_img = p_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        px = int((w - p_img.width) / 2)
+        py = int(h * 0.24 + (max_p_h - p_img.height) / 2)
+        center_ratio = ((px + p_img.width / 2) / w, (py + p_img.height / 2) / h)
+
+    # 2. الخلفية الفاخرة: تدرج شعاعي (Spotlight) يبدأ أبيض/فاتح عند موضع
+    #    المنتج بالضبط، ثم يتدرج تدريجياً إلى الأحمر ثم إلى الأسود الداكن
+    #    باتجاه حواف الصورة. هذا يضمن أن أي منتج - حتى الداكن اللون - يظهر
+    #    بوضوح تام لأنه يقع دائماً على أفتح نقطة في كامل التصميم.
+    gradient_stops = [
+        (0.00, (255, 255, 255)),
+        (0.26, (255, 232, 227)),
+        (0.50, (231, 55, 50)),
+        (0.75, (104, 16, 18)),
+        (1.00, (13, 8, 9)),
+    ]
+    gradient = _radial_stage_gradient(w, h, center_ratio, gradient_stops).convert("RGBA")
+    base.alpha_composite(gradient)
 
     # 3. شعار شركة الحلول الجديدة بالمنتصف الأعلى - داخل بطاقة موحدة
     #    (يحل مشكلة عدم تناسق شكل اللوقو مهما كانت خلفية الملف الأصلي)
@@ -306,48 +379,11 @@ def generate_poster(
         except Exception as e:
             logger.warning(f"تعذر إضافة اللوقو: {e}")
 
-    # 4. تثبيت صورة المنتج + توهج خفيف حوله + ظل تماس واقعي
-    if os.path.exists(product_image_path):
-        p_img = Image.open(product_image_path).convert("RGBA")
-        p_img = ImageOps.exif_transpose(p_img)
-
-        # قص أي هامش شفاف حول الصنف الفعلي (ناتج عن إزالة الخلفية)، حتى
-        # يتم حساب الحجم والظل بناءً على أبعاد الصنف الحقيقية فقط، لا على
-        # مساحة فارغة حول الصورة - هذا هو سبب ظهور "المنصة" منفصلة وبعيدة
-        # عن الصنف في النتيجة السابقة.
-        bbox = p_img.getbbox()
-        if bbox:
-            p_img = p_img.crop(bbox)
-
-        # مساحة العرض المتاحة للمنتج
-        max_p_w, max_p_h = int(w * 0.62), int(h * 0.36)
-
-        # التكبير/التصغير النسبي حتى يملأ المنتج دائماً هذه المساحة تقريباً
-        scale = min(max_p_w / p_img.width, max_p_h / p_img.height)
-        new_w = max(1, round(p_img.width * scale))
-        new_h = max(1, round(p_img.height * scale))
-        p_img = p_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-
-        px = int((w - p_img.width) / 2)
-        py = int(h * 0.24 + (max_p_h - p_img.height) / 2)
-
+    # 4. تثبيت صورة المنتج + ظل تماس واقعي أسفله (لا حاجة لهالة ضوء منفصلة
+    #    خلف الصنف الآن، لأن الخلفية نفسها مضيئة عند موضعه بالفعل)
+    if p_img is not None:
         center_x = px + p_img.width / 2
-        center_y = py + p_img.height / 2
 
-        # 4أ. توهج ضوئي ناعم جداً يلتصق حول الصنف نفسه (وليس شكلاً منفصلاً
-        # تحته) - يرفع سطوع المنطقة المحيطة بحواف الصنف مباشرة فتبرز عن
-        # الخلفية الداكنة دون أن تظهر كجسم غريب في الصورة.
-        glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        glow_draw = ImageDraw.Draw(glow)
-        glow_w, glow_h = p_img.width * 1.5, p_img.height * 1.5
-        glow_draw.ellipse(
-            [center_x - glow_w / 2, center_y - glow_h / 2, center_x + glow_w / 2, center_y + glow_h / 2],
-            fill=(255, 250, 245, 55),
-        )
-        glow = glow.filter(ImageFilter.GaussianBlur(int(w * 0.05)))
-        base.alpha_composite(glow)
-
-        # 4ب. ظل تماس رفيع وواقعي أسفل الصنف مباشرة (بدل الظل العريض السابق)
         shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         sh_draw = ImageDraw.Draw(shadow)
         shadow_y = py + p_img.height
@@ -355,7 +391,7 @@ def generate_poster(
         sh_h = max(10, int(p_img.height * 0.09))
         sh_draw.ellipse(
             [center_x - sh_w / 2, shadow_y - sh_h / 2, center_x + sh_w / 2, shadow_y + sh_h / 2],
-            fill=(0, 0, 0, 150),
+            fill=(45, 15, 14, 130),
         )
         shadow = shadow.filter(ImageFilter.GaussianBlur(max(6, int(sh_h * 0.6))))
         base.alpha_composite(shadow)
