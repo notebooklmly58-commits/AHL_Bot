@@ -73,6 +73,7 @@ class PosterFlow(StatesGroup):
     waiting_feat1 = State()
     waiting_feat2 = State()
     waiting_feat3 = State()
+    waiting_feat4 = State()
     waiting_promo = State()
     waiting_size = State()
 
@@ -150,7 +151,7 @@ async def _cleanup_state_files(state: FSMContext):
 HELP_TEXT = (
     "📋 **كل ميزات وأوامر بوت شركة الحلول الجديدة**\n\n"
     "**🖼️ الوضع العادي (خطوة بخطوة):**\n"
-    "أرسل صورة المنتج → الاسم → السعر (أو تخطي) → حتى 3 مواصفات (أو تخطي) "
+    "أرسل صورة المنتج → الاسم → السعر (أو تخطي) → حتى 4 مواصفات (أو تخطي) "
     "→ عرض ترويجي (أو تخطي) → اختر المقاس، ويصمم البوستر تلقائياً.\n"
     "بعد كل بوستر يمكنك توليد نفس المنتج بمقاس آخر مباشرة، أو البدء بمنتج "
     "جديد بمجرد إرسال صورة جديدة (بدون الحاجة لـ /start مجدداً).\n\n"
@@ -407,9 +408,14 @@ async def quick_got_photo(message: Message, state: FSMContext):
             await message.bot.download(photo, destination=raw_path)
             async with _PROCESSING_SEMAPHORE:
                 await asyncio.to_thread(remove_background, raw_path, clean_path)
-        except Exception:
+        except Exception as e:
             logger.exception("فشل تجهيز صورة الوضع السريع")
-            await msg.edit_text("❌ حدث خطأ في معالجة الصورة، حاول إرسالها مجدداً.")
+            reason = str(e).strip().splitlines()[0] if str(e).strip() else ""
+            reason = reason[:180]
+            await msg.edit_text(
+                "❌ حدث خطأ في معالجة الصورة، حاول إرسالها مجدداً."
+                + (f"\n\n🔧 السبب الفني: {reason}" if reason else "")
+            )
             if os.path.exists(raw_path):
                 os.remove(raw_path)
             return
@@ -503,8 +509,11 @@ async def got_photo(message: Message, state: FSMContext):
             await state.set_state(PosterFlow.waiting_name)
         except Exception as e:
             logger.exception("فشل في معالجة الصورة")
+            reason = str(e).strip().splitlines()[0] if str(e).strip() else ""
+            reason = reason[:180]
             await msg.edit_text(
                 "❌ حدث خطأ أثناء معالجة الصورة. تأكد أنها صورة واضحة للمنتج وحاول إرسالها مجدداً."
+                + (f"\n\n🔧 السبب الفني: {reason}" if reason else "")
             )
             if os.path.exists(raw_path):
                 os.remove(raw_path)
@@ -540,7 +549,8 @@ async def got_name(message: Message, state: FSMContext):
         return
     await state.update_data(product_name=name)
     await message.answer(
-        "💰 الآن أرسل **سعر المنتج** بالأرقام فقط (مثال: 45) أو اضغط تخطي:",
+        "💰 الآن أرسل **سعر المنتج** بالصيغة التي تريدها بالضبط كما ستظهر في "
+        "البوستر (مثال: 45 د.ل، أو 45 دينار، أو 45$) أو اضغط تخطي:",
         reply_markup=_skip_keyboard("price"),
     )
     await state.set_state(PosterFlow.waiting_price)
@@ -573,11 +583,17 @@ async def handle_skip(callback: CallbackQuery, state: FSMContext):
     elif step == "feat2":
         await state.update_data(feat2="")
         await callback.message.edit_text(
-            "⭐ أرسل **الميزة الثالثة والأخيرة** أو تخطى الحقل:", reply_markup=_skip_keyboard("feat3")
+            "⭐ أرسل **الميزة الثالثة** أو تخطى الحقل:", reply_markup=_skip_keyboard("feat3")
         )
         await state.set_state(PosterFlow.waiting_feat3)
     elif step == "feat3":
         await state.update_data(feat3="")
+        await callback.message.edit_text(
+            "⭐ أرسل **الميزة الرابعة والأخيرة** أو تخطى الحقل:", reply_markup=_skip_keyboard("feat4")
+        )
+        await state.set_state(PosterFlow.waiting_feat4)
+    elif step == "feat4":
+        await state.update_data(feat4="")
         await callback.message.edit_text(
             "🚀 أرسل **العرض الترويجي النهائي** أسفل الاسم أو اضغط تخطي للإنهاء الفوري:",
             reply_markup=_skip_keyboard("promo"),
@@ -615,7 +631,7 @@ async def got_feat1(message: Message, state: FSMContext):
 async def got_feat2(message: Message, state: FSMContext):
     await state.update_data(feat2=message.text.strip())
     await message.answer(
-        "⭐ أرسل **الميزة الثالثة والأخيرة** أو اضغط تخطي:", reply_markup=_skip_keyboard("feat3")
+        "⭐ أرسل **الميزة الثالثة** أو اضغط تخطي:", reply_markup=_skip_keyboard("feat3")
     )
     await state.set_state(PosterFlow.waiting_feat3)
 
@@ -623,6 +639,15 @@ async def got_feat2(message: Message, state: FSMContext):
 @router.message(PosterFlow.waiting_feat3, F.text)
 async def got_feat3(message: Message, state: FSMContext):
     await state.update_data(feat3=message.text.strip())
+    await message.answer(
+        "⭐ أرسل **الميزة الرابعة والأخيرة** أو اضغط تخطي:", reply_markup=_skip_keyboard("feat4")
+    )
+    await state.set_state(PosterFlow.waiting_feat4)
+
+
+@router.message(PosterFlow.waiting_feat4, F.text)
+async def got_feat4(message: Message, state: FSMContext):
+    await state.update_data(feat4=message.text.strip())
     await message.answer(
         "🚀 أرسل **العرض الترويجي النهائي** أسفل الاسم أو اضغط تخطي للإنهاء التام:",
         reply_markup=_skip_keyboard("promo"),
@@ -659,6 +684,8 @@ async def got_size(callback: CallbackQuery, state: FSMContext):
         features_list.append(data["feat2"])
     if data.get("feat3"):
         features_list.append(data["feat3"])
+    if data.get("feat4"):
+        features_list.append(data["feat4"])
 
     output_path = None
     try:
