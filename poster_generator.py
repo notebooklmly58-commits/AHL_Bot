@@ -360,37 +360,80 @@ def generate_poster(
         py = int(h * 0.24 + (max_p_h - p_img.height) / 2)
         center_ratio = ((px + p_img.width / 2) / w, (py + p_img.height / 2) / h)
 
-    # 2. الخلفية الفاخرة: تدرج شعاعي (Spotlight) يبدأ أبيض/فاتح عند موضع
-    #    المنتج بالضبط، ثم يتدرج تدريجياً إلى الأحمر ثم إلى الأسود الداكن
-    #    باتجاه حواف الصورة. هذا يضمن أن أي منتج - حتى الداكن اللون - يظهر
-    #    بوضوح تام لأنه يقع دائماً على أفتح نقطة في كامل التصميم.
+    # ------------------------------------------------------------------
+    # لوحة ألوان العلامة التجارية (مطابقة للوقو AHL: أحمر / أسود / أبيض)
+    # ------------------------------------------------------------------
+    BRAND_RED = (211, 27, 35)
+    BRAND_RED_DARK = (150, 16, 22)
+    BRAND_BLACK = (18, 18, 21)
+    INK = (24, 24, 27)          # لون النصوص الرئيسية على الخلفية البيضاء
+    INK_SOFT = (108, 108, 114)  # نص ثانوي (السطر التسويقي)
+    LINE_GRAY = (222, 222, 226)
+    CARD_BG = (250, 250, 251)
+    CARD_BORDER = (228, 228, 232)
+
+    FOOTER_H = int(h * 0.135)
+    footer_top = h - FOOTER_H
+
+    # 2. الخلفية: أبيض نظيف بالكامل مع تدرّج شعاعي شديد الخفة فقط لإعطاء
+    #    عمق بصري احترافي (يبقى أبيض عملياً، لا يتحول أبداً للون آخر) خلف
+    #    منطقة المنتج، بدل خلفية مسطحة تماماً بلا حياة.
     gradient_stops = [
         (0.00, (255, 255, 255)),
-        (0.26, (255, 232, 227)),
-        (0.50, (231, 55, 50)),
-        (0.75, (104, 16, 18)),
-        (1.00, (13, 8, 9)),
+        (0.55, (255, 255, 255)),
+        (1.00, (240, 240, 242)),
     ]
     gradient = _radial_stage_gradient(w, h, center_ratio, gradient_stops).convert("RGBA")
     base.alpha_composite(gradient)
 
-    # 3. شعار شركة الحلول الجديدة بالمنتصف الأعلى - داخل بطاقة موحدة
-    #    (يحل مشكلة عدم تناسق شكل اللوقو مهما كانت خلفية الملف الأصلي)
+    # 3. زخارف هندسية بألوان الشركة (حلقات مستوحاة من ترس اللوقو) - خفيفة
+    #    جداً وموضوعة في الزوايا فقط، بحيث تُضفي طابعاً احترافياً متناسقاً
+    #    مع هوية العلامة دون أن تُشتت النظر عن المنتج أو تكسر بياض الخلفية.
+    accent = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ad = ImageDraw.Draw(accent)
+    r1 = int(w * 0.46)
+    cx1, cy1 = int(w * 0.96), int(h * 0.02)
+    ad.ellipse([cx1 - r1, cy1 - r1, cx1 + r1, cy1 + r1], outline=(*BRAND_RED, 46), width=max(2, int(w * 0.006)))
+    r2 = int(w * 0.33)
+    ad.ellipse([cx1 - r2, cy1 - r2, cx1 + r2, cy1 + r2], outline=(*BRAND_BLACK, 26), width=max(2, int(w * 0.004)))
+    r3 = int(w * 0.20)
+    cx2, cy2 = int(-w * 0.02), int(footer_top * 1.02)
+    ad.ellipse([cx2 - r3, cy2 - r3, cx2 + r3, cy2 + r3], outline=(*BRAND_RED, 40), width=max(2, int(w * 0.005)))
+    base.alpha_composite(accent)
+
+    # شريط علوي أحمر رفيع - إمضاء بصري ثابت للعلامة أعلى كل بوستر
+    top_bar_h = max(4, int(h * 0.012))
+    draw.rectangle([0, 0, w, top_bar_h], fill=BRAND_RED)
+
+    # 4. شعار شركة الحلول الجديدة بالمنتصف الأعلى، على بطاقة بيضاء بحد
+    #    أحمر رفيع + ظل ناعم أسفلها لإعطاء إحساس "بطاقة عائمة" فاخرة.
     logo_path = os.path.join(LOGO_DIR, "logo.png")
     if os.path.exists(logo_path):
         try:
-            logo_img = _prepare_logo(logo_path, int(w * 0.20))
+            logo_img = _prepare_logo(logo_path, int(w * 0.22))
             logo_x = int((w - logo_img.width) / 2)
-            logo_y = int(h * 0.05)
+            logo_y = int(h * 0.055)
 
-            pad = int(w * 0.018)
-            card = Image.new("RGBA", (logo_img.width + pad * 2, logo_img.height + pad * 2), (0, 0, 0, 0))
+            pad = int(w * 0.02)
+            card_w, card_h = logo_img.width + pad * 2, logo_img.height + pad * 2
+
+            card_shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            cs_draw = ImageDraw.Draw(card_shadow)
+            cs_draw.rounded_rectangle(
+                [logo_x - pad, logo_y - pad + int(card_h * 0.08), logo_x - pad + card_w, logo_y - pad + card_h + int(card_h * 0.08)],
+                radius=16,
+                fill=(0, 0, 0, 40),
+            )
+            card_shadow = card_shadow.filter(ImageFilter.GaussianBlur(int(w * 0.01) or 1))
+            base.alpha_composite(card_shadow)
+
+            card = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
             card_draw = ImageDraw.Draw(card)
             card_draw.rounded_rectangle(
                 [0, 0, card.width - 1, card.height - 1],
-                radius=14,
-                fill=(20, 20, 24, 235),
-                outline=(215, 25, 32, 255),
+                radius=16,
+                fill=(255, 255, 255, 255),
+                outline=(*BRAND_RED, 255),
                 width=2,
             )
             card.paste(logo_img, (pad, pad), logo_img)
@@ -398,72 +441,83 @@ def generate_poster(
         except Exception as e:
             logger.warning(f"تعذر إضافة اللوقو: {e}")
 
-    # 4. تثبيت صورة المنتج + ظل تماس واقعي أسفله (لا حاجة لهالة ضوء منفصلة
-    #    خلف الصنف الآن، لأن الخلفية نفسها مضيئة عند موضعه بالفعل)
+    # 5. تثبيت صورة المنتج + ظل تماس واقعي أسفله (ظل رمادي داكن ناعم يعطي
+    #    إحساس "تصوير استوديو احترافي" على الخلفية البيضاء)
     if p_img is not None:
         center_x = px + p_img.width / 2
 
         shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         sh_draw = ImageDraw.Draw(shadow)
         shadow_y = py + p_img.height
-        sh_w = p_img.width * 0.7
-        sh_h = max(10, int(p_img.height * 0.09))
+        sh_w = p_img.width * 0.72
+        sh_h = max(10, int(p_img.height * 0.10))
         sh_draw.ellipse(
             [center_x - sh_w / 2, shadow_y - sh_h / 2, center_x + sh_w / 2, shadow_y + sh_h / 2],
-            fill=(45, 15, 14, 130),
+            fill=(20, 20, 22, 95),
         )
         shadow = shadow.filter(ImageFilter.GaussianBlur(max(6, int(sh_h * 0.6))))
         base.alpha_composite(shadow)
 
         base.paste(p_img, (px, py), p_img)
 
-    # 5. تحميل الخطوط
-    font_title = _load_font(int(w * 0.045), bold=True)
+    # 6. تحميل الخطوط
+    font_title = _load_font(int(w * 0.046), bold=True)
     font_promo = _load_font(int(w * 0.024), bold=False)
     font_price = _load_font(int(w * 0.032), bold=True)
 
     text_y = int(h * 0.65)
 
-    # اسم المنتج (يمين)
+    # اسم المنتج (يمين) - أسود فاخر بارز على الخلفية البيضاء
     if product_name and product_name.strip():
         draw_rtl_text(
             draw,
             (w - int(w * 0.08), text_y),
             product_name.strip(),
             font=font_title,
-            fill=(255, 255, 255),
+            fill=INK,
             anchor="rm",
+        )
+        # خط أحمر قصير أنيق تحت الاسم مباشرة لإبراز العنوان
+        name_w = measure_rtl_text(draw, product_name.strip(), font_title)
+        underline_y = text_y + int(h * 0.028)
+        draw.line(
+            [(w - int(w * 0.08), underline_y), (w - int(w * 0.08) - min(name_w, w * 0.5) * 0.35, underline_y)],
+            fill=BRAND_RED,
+            width=max(3, int(h * 0.004)),
         )
 
     # السطر التسويقي
     if promo_text and promo_text.strip():
         draw_rtl_text(
             draw,
-            (w - int(w * 0.08), text_y + int(h * 0.055)),
+            (w - int(w * 0.08), text_y + int(h * 0.062)),
             promo_text.strip(),
             font=font_promo,
-            fill=(170, 170, 175),
+            fill=INK_SOFT,
             anchor="rm",
         )
 
-    # 6. بطاقة السعر (يسار)
+    # 7. بطاقة السعر (يسار) - يُعرض السعر كما كتبه المستخدم بالضبط، بدون
+    #    فرض أي عملة أو نص ثابت، حتى يتحكم هو بالصيغة كاملة (45 د.ل، 45$، ...)
     if price and price.strip():
-        clean_price = price.replace("د.ل", "").strip()
-        price_display = f"{clean_price} د.ل"
+        price_display = price.strip()
+        badge_w = max(int(w * 0.20), min(int(w * 0.34), int(measure_rtl_text(draw, price_display, font_price) + w * 0.09)))
+        badge_x0 = w * 0.08
         draw.rounded_rectangle(
-            [w * 0.08, text_y - 5, w * 0.28, text_y + int(h * 0.055)], radius=8, fill=(215, 25, 32)
+            [badge_x0, text_y - 5, badge_x0 + badge_w, text_y + int(h * 0.055)], radius=10, fill=BRAND_RED
         )
         draw_rtl_text(
             draw,
-            (w * 0.18, text_y + int(h * 0.025)),
+            (badge_x0 + badge_w / 2, text_y + int(h * 0.025)),
             price_display,
             font=font_price,
             fill=(255, 255, 255),
             anchor="mm",
         )
 
-    # 7. كبسولات المواصفات
-    feat_y_start = text_y + int(h * 0.11)
+    # 8. كبسولات المواصفات (حتى 4، بطاقات بيضاء أنيقة بحد رمادي فاتح ونقطة
+    #    حمراء مميزة - تناسق كامل مع باقي التصميم الفاتح)
+    feat_y_start = text_y + int(h * 0.115)
     col_w = int(w * 0.42)
     box_h = int(h * 0.05)
 
@@ -477,12 +531,14 @@ def generate_poster(
 
         draw.rounded_rectangle(
             [cx_center - col_w // 2, cy_center - box_h // 2, cx_center + col_w // 2, cy_center + box_h // 2],
-            radius=6,
-            fill=(26, 26, 30),
+            radius=8,
+            fill=CARD_BG,
+            outline=CARD_BORDER,
+            width=1,
         )
 
         dot_x = cx_center + col_w // 2 - int(w * 0.03)
-        draw.ellipse([dot_x - 4, cy_center - 4, dot_x + 4, cy_center + 4], fill=(215, 25, 32))
+        draw.ellipse([dot_x - 4, cy_center - 4, dot_x + 4, cy_center + 4], fill=BRAND_RED)
 
         current_feat_size = int(w * 0.024)
         feat_font = _load_font(current_feat_size, bold=False)
@@ -496,13 +552,15 @@ def generate_poster(
             (dot_x - int(w * 0.02), cy_center),
             feat,
             font=feat_font,
-            fill=(240, 240, 240),
+            fill=INK,
             anchor="rm",
         )
 
-    # 8. شريط التذييل - أوضح وأكبر، بسطرين منفصلين لسهولة القراءة
-    footer_line_y = int(h * 0.875)
-    draw.line([(w * 0.08, footer_line_y), (w * 0.92, footer_line_y)], fill=(60, 60, 66), width=1)
+    # 9. شريط التذييل: لوحة سوداء فاخرة أسفل التصميم بالكامل (تماماً كإطار
+    #    اللوقو الأسود) بخط أحمر رفيع أعلاها - تُغلق التصميم على نفس ألوان
+    #    العلامة الثلاثة (أبيض للجسم، أسود للتذييل، أحمر للتمييز).
+    draw.rectangle([0, footer_top, w, footer_top + max(2, int(h * 0.006))], fill=BRAND_RED)
+    draw.rectangle([0, footer_top + max(2, int(h * 0.006)), w, h], fill=BRAND_BLACK)
 
     font_footer_name = _load_font(int(w * 0.026), bold=True)
     font_footer_phone = _load_font(int(w * 0.023), bold=False)
@@ -510,26 +568,28 @@ def generate_poster(
     company_name = company.get("company_name") or company.get("name") or "شركة الحلول الجديدة"
     slogan = company.get("company_slogan") or company.get("slogan") or "لاستيراد وبيع كماليات السيارات"
 
-    # السطر الأول: اسم الشركة بارز وواضح
+    footer_center_y = footer_top + FOOTER_H / 2
+
+    # السطر الأول: اسم الشركة بارز باللون الأبيض
     draw_rtl_text(
         draw,
-        (w / 2, h * 0.915),
+        (w / 2, footer_center_y - int(h * 0.022)),
         f"{company_name} {slogan}",
         font=font_footer_name,
-        fill=(235, 235, 238),
+        fill=(248, 248, 248),
         anchor="mm",
     )
 
-    # السطر الثاني: أرقام الهواتف بحجم أكبر ووضوح أعلى
+    # السطر الثاني: أرقام الهواتف باللون الأحمر لتمييزها بوضوح
     p1 = company.get("phone1", "0924565333")
     p2 = company.get("phone2", "0914565333")
     phone_text = f"📞 {p1}   |   📞 {p2}"
     draw_rtl_text(
         draw,
-        (w / 2, h * 0.955),
+        (w / 2, footer_center_y + int(h * 0.022)),
         phone_text,
         font=font_footer_phone,
-        fill=(215, 25, 32),
+        fill=BRAND_RED,
         anchor="mm",
     )
 
@@ -538,7 +598,7 @@ def generate_poster(
     out_path = os.path.join(GENERATED_DIR, out_name)
     os.makedirs(GENERATED_DIR, exist_ok=True)
 
-    final_image = Image.new("RGB", base.size, (15, 15, 18))
+    final_image = Image.new("RGB", base.size, (255, 255, 255))
     final_image.paste(base, mask=base.split()[3])
     final_image.save(out_path, "PNG", quality=100)
 
