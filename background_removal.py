@@ -34,9 +34,14 @@ _mp_context = multiprocessing.get_context("spawn")
 
 
 def remove_background(input_path: str, output_path: str) -> str:
+    # قناة (Queue) لتمرير سبب الفشل الحقيقي (نص الاستثناء الكامل) من داخل
+    # العملية الفرعية إلى العملية الرئيسية. بدونها، كل فشل - مهما كان سببه
+    # الفعلي (صورة تالفة، منتج غير واضح، نفاد ذاكرة، ...) - كان يظهر بنفس
+    # الرسالة العامة، مما جعل تشخيص المشكلة الحقيقية شبه مستحيل من السجلات.
+    error_queue = _mp_context.Queue()
     process = _mp_context.Process(
         target=_run_in_subprocess,
-        args=(input_path, output_path, _MAX_DIMENSION),
+        args=(input_path, output_path, _MAX_DIMENSION, error_queue),
     )
     process.start()
     process.join(timeout=_SUBPROCESS_TIMEOUT)
@@ -53,13 +58,37 @@ def remove_background(input_path: str, output_path: str) -> str:
         raise TimeoutError("انتهى وقت معالجة الصورة (bg removal subprocess timeout)")
 
     if process.exitcode != 0 or not os.path.exists(output_path):
-        raise RuntimeError(f"فشلت عملية إزالة الخلفية الفرعية (exit code: {process.exitcode})")
+        detail = None
+        try:
+            if not error_queue.empty():
+                detail = error_queue.get_nowait()
+        except Exception:
+            pass
+        # exitcode سالب يعني أن نظام التشغيل أنهى العملية بإشارة (غالباً
+        # SIGKILL بسبب نفاد الذاكرة على خطة Railway المجانية) لا بسبب خطأ
+        # برمجي داخل بايثون نفسه - نوضح هذا صراحة في رسالة السجل.
+        if detail is None and process.exitcode is not None and process.exitcode < 0:
+            detail = f"العملية أُنهيت قسرياً بإشارة نظام التشغيل (على الأغلب نفاد الذاكرة)، رمز: {process.exitcode}"
+        raise RuntimeError(
+            f"فشلت عملية إزالة الخلفية الفرعية (exit code: {process.exitcode}): {detail or 'سبب غير معروف'}"
+        )
 
     gc.collect()
     return output_path
 
 
-def _run_in_subprocess(input_path: str, output_path: str, max_dimension: int) -> None:
+def _run_in_subprocess(input_path: str, output_path: str, max_dimension: int, error_queue=None) -> None:
     """نقطة الدخول التي تُنفَّذ بالكامل داخل العملية الفرعية الجديدة."""
     from bg_removal_worker import process_image_in_subprocess
-    process_image_in_subprocess(input_path, output_path, max_dimension)
+
+    try:
+        process_image_in_subprocess(input_path, output_path, max_dimension)
+    except Exception:
+        import traceback
+
+        if error_queue is not None:
+            try:
+                error_queue.put(traceback.format_exc(limit=6))
+            except Exception:
+                pass
+        raise
