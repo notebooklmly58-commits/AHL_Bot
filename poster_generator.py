@@ -250,9 +250,9 @@ def _radial_stage_gradient(w: int, h: int, center_ratio, stops, small: int = 96)
     الاحترافي، ويحل مشكلة اختفاء الأصناف الداكنة داخل خلفية داكنة لأن
     المنتج يقع دائماً على أفتح نقطة في كامل التصميم.
 
-    يُحسب على شبكة صغيرة (small×small فقط) ثم تُكبَّر بالكامل بدل حساب كل
-    بكسل من الصورة الكاملة يدوياً، لأن ذلك كان سيكون بطيئاً وثقيلاً على
-    المعالج ضمن حدود خطة Railway المجانية.
+    يُحسب باستخدام numpy (سريع ودقيق بكامل دقة الصورة) عند توفره، ويرجع
+    تلقائياً لطريقة احتياطية أبطأ (شبكة صغيرة ثم تكبير) فقط لو numpy غير
+    مثبت في البيئة، حتى لا يتوقف التصميم بالكامل بسبب اعتماد مفقود.
 
     stops: قائمة (المسافة من 0 إلى 1، اللون) مرتبة تصاعدياً حسب المسافة."""
     cx, cy = center_ratio
@@ -263,6 +263,25 @@ def _radial_stage_gradient(w: int, h: int, center_ratio, stops, small: int = 96)
         ((1 - cx) ** 2 + (1 - cy) ** 2) ** 0.5,
     ) or 1.0
 
+    try:
+        import numpy as np
+
+        xs = np.linspace(0.0, 1.0, w, dtype=np.float32)
+        ys = np.linspace(0.0, 1.0, h, dtype=np.float32)
+        gx, gy = np.meshgrid(xs, ys)
+        dist = np.sqrt((gx - cx) ** 2 + (gy - cy) ** 2) / max_dist
+        np.clip(dist, 0.0, 1.0, out=dist)
+
+        stop_d = np.array([s[0] for s in stops], dtype=np.float32)
+        arr = np.empty((h, w, 3), dtype=np.uint8)
+        for ch in range(3):
+            stop_v = np.array([s[1][ch] for s in stops], dtype=np.float32)
+            arr[:, :, ch] = np.interp(dist, stop_d, stop_v).astype(np.uint8)
+        return Image.fromarray(arr, mode="RGB")
+    except ImportError:
+        logger.warning("numpy غير متوفر - سيتم استخدام طريقة تدرج احتياطية أبطأ.")
+
+    # ------ الطريقة الاحتياطية: شبكة صغيرة (small×small) ثم تكبير ------
     grid = Image.new("RGB", (small, small))
     put = grid.putpixel
     for gy in range(small):
