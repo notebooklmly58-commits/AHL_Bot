@@ -306,60 +306,58 @@ def generate_poster(
         except Exception as e:
             logger.warning(f"تعذر إضافة اللوقو: {e}")
 
-    # 4. تثبيت صورة المنتج + "منصة إضاءة" خلفه + الظل
+    # 4. تثبيت صورة المنتج + توهج خفيف حوله + ظل تماس واقعي
     if os.path.exists(product_image_path):
         p_img = Image.open(product_image_path).convert("RGBA")
         p_img = ImageOps.exif_transpose(p_img)
 
-        # مساحة العرض المتاحة للمنتج
-        max_p_w, max_p_h = int(w * 0.70), int(h * 0.40)
+        # قص أي هامش شفاف حول الصنف الفعلي (ناتج عن إزالة الخلفية)، حتى
+        # يتم حساب الحجم والظل بناءً على أبعاد الصنف الحقيقية فقط، لا على
+        # مساحة فارغة حول الصورة - هذا هو سبب ظهور "المنصة" منفصلة وبعيدة
+        # عن الصنف في النتيجة السابقة.
+        bbox = p_img.getbbox()
+        if bbox:
+            p_img = p_img.crop(bbox)
 
-        # التكبير/التصغير النسبي حتى يملأ المنتج دائماً هذه المساحة تقريباً،
-        # سواء كانت الصورة الأصلية صغيرة جداً أو كبيرة جداً (بدل thumbnail
-        # التي كانت تصغّر فقط ولا تكبّر الصور الصغيرة إطلاقاً).
+        # مساحة العرض المتاحة للمنتج
+        max_p_w, max_p_h = int(w * 0.62), int(h * 0.36)
+
+        # التكبير/التصغير النسبي حتى يملأ المنتج دائماً هذه المساحة تقريباً
         scale = min(max_p_w / p_img.width, max_p_h / p_img.height)
         new_w = max(1, round(p_img.width * scale))
         new_h = max(1, round(p_img.height * scale))
         p_img = p_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
         px = int((w - p_img.width) / 2)
-        py = int(h * 0.21 + (max_p_h - p_img.height) / 2)
+        py = int(h * 0.24 + (max_p_h - p_img.height) / 2)
 
-        stage_cx = px + p_img.width // 2
-        stage_cy = py + int(p_img.height * 0.92)
+        center_x = px + p_img.width / 2
+        center_y = py + p_img.height / 2
 
-        # 4أ. هالة ضوء خارجية ناعمة جداً - تكسر قتامة الخلفية حول المنتج
-        halo = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        halo_draw = ImageDraw.Draw(halo)
-        halo_w, halo_h = p_img.width * 1.35, p_img.height * 1.5
-        halo_draw.ellipse(
-            [stage_cx - halo_w / 2, stage_cy - halo_h / 2, stage_cx + halo_w / 2, stage_cy + halo_h / 2],
-            fill=(255, 250, 245, 70),
+        # 4أ. توهج ضوئي ناعم جداً يلتصق حول الصنف نفسه (وليس شكلاً منفصلاً
+        # تحته) - يرفع سطوع المنطقة المحيطة بحواف الصنف مباشرة فتبرز عن
+        # الخلفية الداكنة دون أن تظهر كجسم غريب في الصورة.
+        glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow)
+        glow_w, glow_h = p_img.width * 1.5, p_img.height * 1.5
+        glow_draw.ellipse(
+            [center_x - glow_w / 2, center_y - glow_h / 2, center_x + glow_w / 2, center_y + glow_h / 2],
+            fill=(255, 250, 245, 55),
         )
-        halo = halo.filter(ImageFilter.GaussianBlur(int(w * 0.045)))
-        base.alpha_composite(halo)
+        glow = glow.filter(ImageFilter.GaussianBlur(int(w * 0.05)))
+        base.alpha_composite(glow)
 
-        # 4ب. "منصة" إضاءة فاتحة خلف المنتج مباشرة - هذا هو الحل الاحترافي
-        # لمشكلة اختفاء الأصناف الداكنة داخل خلفية داكنة: نضع سطحاً مضيئاً
-        # بيضاوياً خلف قاعدة المنتج بدل الاعتماد على الخلفية الداكنة وحدها.
-        stage = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        stage_draw = ImageDraw.Draw(stage)
-        stage_w, stage_h = p_img.width * 1.05, p_img.height * 0.62
-        stage_draw.ellipse(
-            [stage_cx - stage_w / 2, stage_cy - stage_h / 2, stage_cx + stage_w / 2, stage_cy + stage_h / 2],
-            fill=(248, 246, 243, 235),
-        )
-        stage = stage.filter(ImageFilter.GaussianBlur(6))
-        base.alpha_composite(stage)
-
-        # 4ج. الظل الطبيعي فوق المنصة مباشرة تحت المنتج
+        # 4ب. ظل تماس رفيع وواقعي أسفل الصنف مباشرة (بدل الظل العريض السابق)
         shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         sh_draw = ImageDraw.Draw(shadow)
+        shadow_y = py + p_img.height
+        sh_w = p_img.width * 0.7
+        sh_h = max(10, int(p_img.height * 0.09))
         sh_draw.ellipse(
-            [px + p_img.width * 0.12, py + p_img.height - 14, px + p_img.width * 0.88, py + p_img.height + 10],
-            fill=(0, 0, 0, 110),
+            [center_x - sh_w / 2, shadow_y - sh_h / 2, center_x + sh_w / 2, shadow_y + sh_h / 2],
+            fill=(0, 0, 0, 150),
         )
-        shadow = shadow.filter(ImageFilter.GaussianBlur(14))
+        shadow = shadow.filter(ImageFilter.GaussianBlur(max(6, int(sh_h * 0.6))))
         base.alpha_composite(shadow)
 
         base.paste(p_img, (px, py), p_img)
