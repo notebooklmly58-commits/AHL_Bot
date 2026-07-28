@@ -45,6 +45,11 @@ def remove_background(input_path: str, output_path: str) -> str:
         logger.error("⏱️ تجاوزت معالجة الصورة الوقت المسموح، سيتم إيقافها قسرياً.")
         process.terminate()
         process.join(timeout=5)
+        if process.is_alive():
+            # terminate() أحياناً لا يكفي لإيقاف عملية عالقة داخل مكتبة C
+            # خارجية (onnxruntime)؛ kill() يرسل SIGKILL مباشرة كحل أخير.
+            process.kill()
+            process.join(timeout=5)
         raise TimeoutError("انتهى وقت معالجة الصورة (bg removal subprocess timeout)")
 
     if process.exitcode != 0 or not os.path.exists(output_path):
