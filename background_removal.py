@@ -25,7 +25,7 @@ import os
 logger = logging.getLogger(__name__)
 
 _MAX_DIMENSION = int(os.getenv("MAX_IMAGE_DIMENSION", "900"))
-_SUBPROCESS_TIMEOUT = int(os.getenv("BG_REMOVAL_TIMEOUT_SECONDS", "120"))
+_SUBPROCESS_TIMEOUT = int(os.getenv("BG_REMOVAL_TIMEOUT_SECONDS", "180"))
 
 # "spawn" عمداً: تبدأ عملية بايثون جديدة تماماً من الصفر بدل استنساخ ذاكرة
 # عملية البوت الحالية، فتضمن عزلاً كاملاً 100% (fork قد يرث حالة خيوط
