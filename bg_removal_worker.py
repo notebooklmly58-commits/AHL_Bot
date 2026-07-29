@@ -1,3 +1,4 @@
+
 """
 هذا الملف يُنفَّذ بالكامل داخل عملية فرعية (subprocess) منعزلة عن عملية
 البوت الرئيسية. أي ذاكرة يحجزها rembg/onnxruntime هنا تختفي تماماً مع
@@ -20,7 +21,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 os.environ.setdefault("ORT_NUM_THREADS", "1")
 
-from PIL import Image, ImageFile, ImageFilter, ImageEnhance
+from PIL import Image, ImageDraw, ImageFile, ImageFilter, ImageEnhance
 
 # تليجرام أحياناً يرسل ملفات JPEG "شبه مكتملة" (خصوصاً الصور المضغوطة أو
 # المرسلة بسرعة من الجوال)، وبدون هذا السطر يرفض Pillow فتحها بالكامل
@@ -55,6 +56,18 @@ _BG_MODEL = os.getenv("BG_REMOVAL_MODEL", "isnet-general-use")
 # requirements.txt - لو لم تكن مثبتة، نكتشف ذلك تلقائياً ونكمل بدونها
 # بدل توقف المعالجة بالكامل.
 _USE_ALPHA_MATTING = os.getenv("BG_REMOVAL_ALPHA_MATTING", "1") == "1"
+
+# ------------------------------------------------------------------
+# حتى النموذج الأدق (isnet-general-use) قد يفشل في حالات "منتج فاتح على
+# خلفية فاتحة جداً" لأن الفرق اللوني بينهما ضئيل حتى بالنسبة لنموذج ذكاء
+# اصطناعي مدرَّب - هذا بالضبط ما حدث مع صندوق C6 الأبيض حتى بعد تبديل
+# النموذج. لذلك نضيف طبقة "إنقاذ" لا تعتمد على أي نموذج ذكاء اصطناعي
+# إطلاقاً، بل على حقيقة هندسية بسيطة وموثوقة: خلفية صورة المنتج دائماً
+# متصلة بحواف الصورة الأربعة، بينما جسم المنتج محاط بحد/ظل يفصله عنها -
+# حتى لو كان بنفس درجة اللون تقريباً. أي منطقة "محاصرة" لا تتصل بحواف
+# الصورة تُعتبر جزءاً من المنتج، حتى لو صنّفها النموذج خطأً كخلفية شفافة.
+_USE_EDGE_RESCUE = os.getenv("BG_REMOVAL_EDGE_RESCUE", "1") == "1"
+_EDGE_RESCUE_TOLERANCE = int(os.getenv("BG_REMOVAL_EDGE_TOLERANCE", "26"))
 
 
 def process_image_in_subprocess(input_path: str, output_path: str, max_dimension: int) -> None:
@@ -102,6 +115,7 @@ def process_image_in_subprocess(input_path: str, output_path: str, max_dimension
 
     buf = io.BytesIO()
     img_in.save(buf, format="PNG")
+    resized_rgb_for_rescue = img_in.copy() if _USE_EDGE_RESCUE else None
     img_in.close()
     resized_bytes = buf.getvalue()
     buf.close()
@@ -131,6 +145,14 @@ def process_image_in_subprocess(input_path: str, output_path: str, max_dimension
     img = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
     del output_bytes
 
+    if _USE_EDGE_RESCUE and resized_rgb_for_rescue is not None:
+        try:
+            img = _rescue_low_contrast_holes(img, resized_rgb_for_rescue, _EDGE_RESCUE_TOLERANCE)
+        except Exception as e:
+            logger.warning(f"تعذر تطبيق مرحلة إنقاذ الحواف منخفضة التباين: {e}")
+    if resized_rgb_for_rescue is not None:
+        resized_rgb_for_rescue.close()
+
     # تحقّق أن النموذج فعلاً "وجد" منتجاً في الصورة قبل المتابعة. لو كانت
     # الصورة معقدة جداً أو المنتج غير واضح، أحياناً ينتج rembg صورة شفافة
     # بالكامل تقريباً - وبدون هذا التحقق كان البوستر يُصمّم لاحقاً بمنتج
@@ -145,6 +167,54 @@ def process_image_in_subprocess(input_path: str, output_path: str, max_dimension
     img = _auto_enhance(img)
     img.save(output_path, "PNG")
     img.close()
+
+
+def _rescue_low_contrast_holes(cut_img: Image.Image, original_rgb: Image.Image, tolerance: int) -> Image.Image:
+    """
+    يعيد أي جزء من المنتج حذفه النموذج بالخطأ لأن لونه قريب جداً من لون
+    الخلفية (حالة "منتج أبيض على خلفية بيضاء"). الفكرة: نملأ (flood fill)
+    من حواف الصورة فقط بالألوان القريبة من كل نقطة بداية - أي منطقة لم
+    يصل إليها الملء (أي "محاصرة" ولا تتصل بحواف الصورة) تُعتبر جزءاً من
+    المنتج وتُفرض شفافيتها كاملة (غير شفافة)، بصرف النظر عمّا قرره النموذج.
+    """
+    import numpy as np
+
+    w, h = original_rgb.size
+    work = original_rgb.copy()
+    MARK = (255, 0, 255)  # لون علامة صارخ نادراً ما يظهر في صور المنتجات
+
+    seeds = set()
+    step_x = max(3, w // 80)
+    for x in range(0, w, step_x):
+        seeds.add((x, 0))
+        seeds.add((x, h - 1))
+    step_y = max(3, h // 80)
+    for y in range(0, h, step_y):
+        seeds.add((0, y))
+        seeds.add((w - 1, y))
+
+    for seed in seeds:
+        try:
+            if work.getpixel(seed) != MARK:
+                ImageDraw.floodfill(work, seed, MARK, thresh=tolerance)
+        except Exception:
+            continue
+
+    arr = np.array(work)
+    bg_confirmed = np.all(arr == np.array(MARK), axis=-1)  # خلفية مؤكدة (متصلة بالحواف)
+    foreground_candidate = (~bg_confirmed).astype("uint8") * 255
+
+    fg_mask_img = Image.fromarray(foreground_candidate, mode="L")
+    # تنعيم بسيط لحواف هذا القناع الإضافي فقط، لتجنّب أي حدود مسننة عند دمجه
+    fg_mask_img = fg_mask_img.filter(ImageFilter.GaussianBlur(1.2))
+
+    cut_alpha = np.array(cut_img.split()[3])
+    fg_alpha = np.array(fg_mask_img)
+    combined_alpha = np.maximum(cut_alpha, fg_alpha)
+
+    rgb_arr = np.array(original_rgb)
+    out = np.dstack([rgb_arr, combined_alpha])
+    return Image.fromarray(out, mode="RGBA")
 
 
 def _auto_enhance(img: Image.Image) -> Image.Image:
